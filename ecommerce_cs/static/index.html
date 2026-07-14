@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛒 电商智能客服</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <h2>🛒 智能客服</h2>
+    <button class="btn-new-chat" onclick="newSession()" title="新建会话">＋ 新会话</button>
+  </div>
+  <div class="sidebar-list" id="sessionList">
+    <!-- 会话列表动态生成 -->
+  </div>
+  <div class="sidebar-footer">
+    <div class="status-dot online"></div>
+    <span>客服系统在线</span>
+    <small style="color:#888">工作时段 9:00-22:00</small>
+  </div>
+</aside>
+
+<!-- 主聊天区 -->
+<main class="chat-main">
+  <header class="chat-header">
+    <h1 id="chatTitle">电商智能客服</h1>
+    <p id="chatSubtitle">AI 助手在线，为您提供订单、商品、售后等全方位服务</p>
+  </header>
+
+  <div class="chat-messages" id="chatMessages">
+    <div class="welcome-message">
+      <div class="welcome-icon">🛒</div>
+      <h2>欢迎来到电商智能客服</h2>
+      <p>我可以帮您：</p>
+      <div class="quick-actions">
+        <button onclick="quickAsk('帮我查一下我的订单')">📦 查询订单</button>
+        <button onclick="quickAsk('推荐一款降噪耳机')">🛍️ 商品推荐</button>
+        <button onclick="quickAsk('如何申请退货？')">🔧 退换货</button>
+        <button onclick="quickAsk('支持哪些支付方式？')">📋 常见问题</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 人工审核弹窗 -->
+  <div class="approval-banner" id="approvalBanner" style="display:none">
+    <div class="approval-content">
+      <span>⚠️ 有待审核的售后申请</span>
+      <div class="approval-actions">
+        <button class="btn-approve" onclick="handleApproval(true)">✅ 批准</button>
+        <button class="btn-reject" onclick="handleApproval(false)">❌ 拒绝</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="chat-input-area">
+    <div class="chat-input-wrapper">
+      <input
+        type="text"
+        id="chatInput"
+        placeholder="输入您的问题，如：帮我查一下订单 ORD202401010001..."
+        onkeydown="handleKeyDown(event)"
+        autocomplete="off"
+      />
+      <button class="btn-send" id="btnSend" onclick="sendMessage()">发送</button>
+    </div>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
