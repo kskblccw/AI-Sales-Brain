@@ -32,8 +32,45 @@ from urllib.parse import quote_plus
 DB_URL = f"postgresql+asyncpg://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 DB_URL_SYNC = f"postgresql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
+# LangGraph checkpointer 用 psycopg 3.x 连接字符串（不带 +asyncpg）
+CHECKPOINT_URL = f"postgresql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 # ── Chroma 配置 ─────────────────────────────────────────────────────────────
 CHROMA_PERSIST_DIR = str(Path(__file__).parent / "chroma_db")
+
+# ── LangGraph Checkpointer（同步 PostgresSaver，配合 asyncio.to_thread）─────
+_checkpointer_pool = None
+_checkpointer = None
+
+
+def get_checkpointer_pool():
+    """获取同步 ConnectionPool（单例）"""
+    global _checkpointer_pool
+    if _checkpointer_pool is None:
+        from psycopg_pool import ConnectionPool
+        _checkpointer_pool = ConnectionPool(
+            CHECKPOINT_URL,
+            min_size=2,
+            max_size=10,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+    return _checkpointer_pool
+
+
+def get_checkpointer():
+    """获取 PostgresSaver（同步版）单例
+
+    Windows 上 psycopg3 async 不兼容 ProactorEventLoop，
+    因此使用同步版 PostgresSaver，在 FastAPI async 端点中
+    通过 asyncio.to_thread() 调用 graph 的同步方法。
+    """
+    global _checkpointer
+    if _checkpointer is None:
+        from langgraph.checkpoint.postgres import PostgresSaver
+        _checkpointer = PostgresSaver(get_checkpointer_pool())
+        _checkpointer.setup()
+    return _checkpointer
+
 
 # ── LLM 工厂 ────────────────────────────────────────────────────────────────
 def make_llm(temperature: float = 0.3):

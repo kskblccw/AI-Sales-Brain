@@ -9,6 +9,7 @@ langchain-classic==1.0.8
 # === LangGraph ===
 langgraph==1.2.9
 langgraph-checkpoint==4.1.1
+langgraph-checkpoint-postgres==3.1.0
 langgraph-prebuilt==1.1.0
 
 # === LangSmith ===
@@ -31,6 +32,9 @@ aiohttp==3.14.1
 # === 数据库 ===
 SQLAlchemy==2.0.51
 asyncpg==0.31.0
+psycopg==3.3.4
+psycopg-pool==3.3.1
+psycopg-binary==3.3.4
 psycopg2-binary==2.9.12
 
 # === OpenAI / LLM ===

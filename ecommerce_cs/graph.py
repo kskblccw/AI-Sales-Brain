@@ -11,8 +11,9 @@ from typing import TypedDict, Annotated, Literal
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
+
+from config import make_llm
 
 from config import make_llm
 from agents.order_agent import build_order_agent
@@ -303,67 +304,22 @@ def build_csr_graph(checkpointer=None):
     builder.add_edge("human_approval", END)
     builder.add_edge("human_handoff", END)
 
-    # 编译
+    # 编译（checkpointer 由调用方注入，server 传入 AsyncPostgresSaver）
     if checkpointer is None:
-        checkpointer = MemorySaver()
-
+        raise ValueError("checkpointer 不能为 None，请传入 PostgresSaver 或 AsyncPostgresSaver 实例")
     return builder.compile(checkpointer=checkpointer)
 
 
-# ── 便捷调用函数 ────────────────────────────────────────────────────────────────
-def chat(question: str, session_id: str = "default") -> str:
-    """
-    单次调用客服Agent（同步、非流式）
-
-    Args:
-        question: 用户问题
-        session_id: 会话ID（相同ID可继续之前的对话）
-
-    Returns:
-        Agent 的最终回复文本
-    """
-    graph = build_csr_graph()
+# ── 便捷函数（用于调试和 eval.py）────────────────────────────────────────────
+def chat(question: str, session_id: str = "default", checkpointer=None) -> str:
+    """单次调用（调试用，需传入 checkpointer）"""
+    graph = build_csr_graph(checkpointer=checkpointer)
     config = {"configurable": {"thread_id": session_id}}
-
     result = graph.invoke(
         {
             "messages": [HumanMessage(content=question)],
-            "intent": "",
-            "iteration_count": 0,
-            "next_agent": "",
+            "intent": "", "iteration_count": 0, "next_agent": "",
         },
-        config=config,
-    )
-
-    return result["messages"][-1].content
-
-
-def get_pending_approval(session_id: str) -> dict | None:
-    """
-    检查指定会话是否有待审核的操作
-
-    Returns:
-        有则返回 interrupt 信息dict，无则返回 None
-    """
-    graph = build_csr_graph()
-    config = {"configurable": {"thread_id": session_id}}
-
-    state = graph.get_state(config)
-    if state.tasks:
-        interrupts = state.tasks[0].interrupts
-        if interrupts:
-            return interrupts[0].value
-    return None
-
-
-def approve(session_id: str, approved: bool = True):
-    """审批通过/拒绝并恢复图执行"""
-    graph = build_csr_graph()
-    config = {"configurable": {"thread_id": session_id}}
-
-    from langgraph.types import Command
-    result = graph.invoke(
-        Command(resume="approve" if approved else "reject"),
         config=config,
     )
     return result["messages"][-1].content
