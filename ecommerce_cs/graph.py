@@ -160,7 +160,7 @@ def supervisor_node(state: CSRState) -> dict:
 
         prompt = f"""根据用户消息决定路由。意图={intent}。
 
-可用：order(订单/物流) product(商品/推荐) aftersale(退货/退款) faq(配送/支付/会员等通用) FINISH(结束)
+可用：order(订单/物流) product(商品/推荐) aftersale(退货/退款) faq(配送/支付/会员等通用) human(转人工客服) FINISH(结束)
 
 对话：
 {context}
@@ -170,7 +170,7 @@ def supervisor_node(state: CSRState) -> dict:
         response = llm.invoke([HumanMessage(content=prompt)])
         decision = response.content.strip()
 
-        if decision not in AGENT_NAMES + ["FINISH"]:
+        if decision not in AGENT_NAMES + ["FINISH", "human"]:
             decision = intent if intent in AGENT_NAMES else "faq"
 
         _safe_print(f"[Supervisor] 第1轮 → {decision}")
@@ -230,27 +230,30 @@ def compress_memory_node(state: CSRState) -> dict:
 
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
-def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
-    _safe_print("[Order Agent] 开始处理...")
-    result = _subgraphs["order"].invoke({"messages": state["messages"]}, config)
-    last_msg = result["messages"][-1]
-    _safe_print(f"[Order Agent] 完成: {str(last_msg.content)[:80]}...")
+def _invoke_subgraph(name: str, state: CSRState, config: RunnableConfig) -> dict:
+    """通用子图调用：执行 → 取最后消息 → 返回结果"""
+    _safe_print(f"[{name}] 开始处理...")
+    result = _subgraphs[name].invoke({"messages": state["messages"]}, config)
+    msgs = result.get("messages", [])
+    if not msgs:
+        _safe_print(f"[{name}] 子图返回空消息，使用兜底回复")
+        return {"messages": [AIMessage(content=f"{name}专员暂时无法处理您的请求，请稍后重试或联系人工客服。")]}
+    last_msg = msgs[-1]
+    _safe_print(f"[{name}] 完成: {str(last_msg.content)[:80]}...")
     return {"messages": [last_msg]}
+
+
+def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
+    return _invoke_subgraph("order", state, config)
 
 
 def call_product_agent(state: CSRState, config: RunnableConfig) -> dict:
-    _safe_print("[Product Agent] 开始处理...")
-    result = _subgraphs["product"].invoke({"messages": state["messages"]}, config)
-    last_msg = result["messages"][-1]
-    _safe_print(f"[Product Agent] 完成: {str(last_msg.content)[:80]}...")
-    return {"messages": [last_msg]}
+    return _invoke_subgraph("product", state, config)
 
 
 def call_aftersale_agent(state: CSRState, config: RunnableConfig) -> dict:
-    _safe_print("[AfterSale Agent] 开始处理...")
-    result = _subgraphs["aftersale"].invoke({"messages": state["messages"]}, config)
+    result = _invoke_subgraph("aftersale", state, config)
     last_msg = result["messages"][-1]
-    _safe_print(f"[AfterSale Agent] 完成: {str(last_msg.content)[:80]}...")
 
     # 检查是否创建了售后工单（包含申请编号 = 需人工审核）
     content = str(last_msg.content) if last_msg.content else ""
@@ -261,15 +264,11 @@ def call_aftersale_agent(state: CSRState, config: RunnableConfig) -> dict:
             "next_agent": "human_approval",
         }
 
-    return {"messages": [last_msg]}
+    return result
 
 
 def call_faq_agent(state: CSRState, config: RunnableConfig) -> dict:
-    _safe_print("[FAQ Agent] 开始处理...")
-    result = _subgraphs["faq"].invoke({"messages": state["messages"]}, config)
-    last_msg = result["messages"][-1]
-    _safe_print(f"[FAQ Agent] 完成: {str(last_msg.content)[:80]}...")
-    return {"messages": [last_msg]}
+    return _invoke_subgraph("faq", state, config)
 
 
 # ── 人工审核节点 ────────────────────────────────────────────────────────────────
@@ -290,10 +289,10 @@ def human_approval_node(state: CSRState) -> dict:
     if approval_result == "approve":
         response = ("✅ 您的售后申请已通过人工审核！"
                     "请按提示将商品寄回，我们收到后将在1-3个工作日内完成处理。"
-                    "如有疑问请随时联系我们。\n\n[DONE]")
+                    "如有疑问请随时联系我们。")
     else:
         response = ("您的售后申请未通过审核。"
-                    "如有疑问请联系人工客服 400-888-8888。\n\n[DONE]")
+                    "如有疑问请联系人工客服 400-888-8888。")
 
     return {"messages": [AIMessage(content=response)]}
 
@@ -304,7 +303,7 @@ def human_handoff_node(state: CSRState) -> dict:
     response = (
         "正在为您转接人工客服，请稍候...\n\n"
         "人工客服将在工作时间内（每天9:00-22:00）尽快为您服务。"
-        "您也可以拨打客服热线 400-888-8888。\n\n[DONE]"
+        "您也可以拨打客服热线 400-888-8888。"
     )
     return {"messages": [AIMessage(content=response)]}
 

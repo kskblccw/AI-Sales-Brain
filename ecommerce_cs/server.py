@@ -122,8 +122,12 @@ async def chat_non_stream(session_id: str, request: Request):
     if not question:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    config = _get_config(session_id)
+    phone_hint = body.get("phone", "")
+    config = _get_config(session_id, phone_hint=phone_hint)
     initial_state = _make_initial_state(question, session_id)
+    # 兜底：如果 phone 参数带了但 _session_phones 是新的
+    if phone_hint and not initial_state.get("user_phone"):
+        initial_state["user_phone"] = phone_hint
 
     def _invoke():
         return _csr_graph.invoke(initial_state, config=config)
@@ -254,7 +258,7 @@ async def approve_action(session_id: str):
     config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
-    if not state.tasks or not state.tasks[0].interrupts:
+    if not state or not state.tasks or not state.tasks[0].interrupts:
         raise HTTPException(status_code=400, detail="该会话没有待审核的操作")
 
     from langgraph.types import Command
@@ -272,7 +276,7 @@ async def reject_action(session_id: str):
     config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
-    if not state.tasks or not state.tasks[0].interrupts:
+    if not state or not state.tasks or not state.tasks[0].interrupts:
         raise HTTPException(status_code=400, detail="该会话没有待审核的操作")
 
     from langgraph.types import Command
@@ -339,7 +343,7 @@ async def get_history(session_id: str):
     state = _csr_graph.get_state(config)
 
     messages = []
-    if state.values:
+    if state and state.values:
         for msg in state.values.get("messages", []):
             msg_type = getattr(msg, "type", "")
             content = str(getattr(msg, "content", ""))

@@ -250,9 +250,9 @@ async def rebuild_index():
     """从数据库重新构建整个知识库（耗时操作）"""
     try:
         build_product_knowledge_base(force=True)
-        # 刷新 collection 引用
-        global _collection
-        _collection = None
+        # 刷新 vectorstore 缓存引用
+        global _vectorstore
+        _vectorstore = None
         return JSONResponse({"message": "知识库重建完成"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重建失败: {e}")

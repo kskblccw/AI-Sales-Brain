@@ -39,7 +39,7 @@ def _user_id_from_phone(phone: str) -> str:
 
 
 def _ensure_profile_table():
-    """建表（幂等）"""
+    """建表（幂等）—— 延迟到首次调用时执行，避免 import 时阻塞"""
     from sqlalchemy import text
     with SyncSessionFactory() as db:
         db.execute(text("""
@@ -56,11 +56,20 @@ def _ensure_profile_table():
         db.commit()
 
 
-_ensure_profile_table()
+_profile_table_ensured = False
+
+
+def _ensure_profile_table_once():
+    """延迟 + 幂等建表：首次调用时执行，后续跳过"""
+    global _profile_table_ensured
+    if not _profile_table_ensured:
+        _ensure_profile_table()
+        _profile_table_ensured = True
 
 
 def load_profile(user_id: str) -> dict:
     """加载用户画像"""
+    _ensure_profile_table_once()
     from sqlalchemy import text
     with SyncSessionFactory() as db:
         row = db.execute(
@@ -87,6 +96,7 @@ def load_profile(user_id: str) -> dict:
 
 def save_profile(user_id: str, profile: dict):
     """保存用户画像"""
+    _ensure_profile_table_once()
     from sqlalchemy import text
     with SyncSessionFactory() as db:
         db.execute(text(
