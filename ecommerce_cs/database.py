@@ -14,10 +14,10 @@ from datetime import datetime
 from typing import Optional, List
 
 from sqlalchemy import (
-    Column, Integer, String, Float, Text, DateTime, ForeignKey, JSON, Enum as SAEnum,
+    Integer, String, Float, Text, DateTime, ForeignKey, JSON, Enum as SAEnum, select,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship, Mapped, mapped_column
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.orm import DeclarativeBase, relationship, Mapped, mapped_column, sessionmaker as sync_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import enum
 
 from config import DB_URL, DB_URL_SYNC
@@ -145,7 +145,6 @@ async_session_factory = async_sessionmaker(async_engine, expire_on_commit=False)
 
 # ── 同步引擎（供 @tool 函数用，LangChain 工具是同步的）────────────────────────
 from sqlalchemy import create_engine as create_sync_engine
-from sqlalchemy.orm import Session as SyncSession, sessionmaker as sync_sessionmaker
 
 sync_engine = create_sync_engine(DB_URL_SYNC, echo=False, pool_size=5, max_overflow=5)
 SyncSessionFactory = sync_sessionmaker(sync_engine, expire_on_commit=False)
@@ -162,14 +161,12 @@ async def init_db():
 
 def find_user_by_phone(phone: str) -> Optional[User]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(select(User).where(User.phone == phone))
         return result.scalar_one_or_none()
 
 
 def find_orders_by_user(user_id: int) -> List[Order]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(
             select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc())
         )
@@ -178,14 +175,12 @@ def find_orders_by_user(user_id: int) -> List[Order]:
 
 def find_order_by_no(order_no: str) -> Optional[Order]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(select(Order).where(Order.order_no == order_no))
         return result.scalar_one_or_none()
 
 
 def search_products_db(keyword: str, limit: int = 5) -> List[Product]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(
             select(Product)
             .where(
@@ -200,14 +195,12 @@ def search_products_db(keyword: str, limit: int = 5) -> List[Product]:
 
 def get_product_by_id(product_id: int) -> Optional[Product]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(select(Product).where(Product.id == product_id))
         return result.scalar_one_or_none()
 
 
 def search_faqs_db(query: str, limit: int = 5) -> List[FAQ]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(
             select(FAQ)
             .where(
@@ -222,7 +215,6 @@ def search_faqs_db(query: str, limit: int = 5) -> List[FAQ]:
 
 def get_faq_categories_sync() -> List[str]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(select(FAQ.category).distinct())
         return list(result.scalars().all())
 
@@ -248,7 +240,6 @@ def create_return_request_sync(
 
 def find_return_by_no(return_no: str) -> Optional[ReturnRequest]:
     with SyncSessionFactory() as db:
-        from sqlalchemy import select
         result = db.execute(
             select(ReturnRequest).where(ReturnRequest.return_no == return_no)
         )

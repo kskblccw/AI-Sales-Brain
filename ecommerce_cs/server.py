@@ -7,22 +7,30 @@ server.py — FastAPI 后端 + SSE 流式端点
 """
 
 import json
-import uuid
 import asyncio
 from pathlib import Path
-from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from langchain_core.messages import HumanMessage
 
-from graph import build_csr_graph, CSRState
+from graph import build_csr_graph
 from rag import build_product_knowledge_base
 
 # ── FastAPI 应用 ────────────────────────────────────────────────────────────────
-app = FastAPI(title="电商智能客服系统", version="1.0")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _csr_graph
+    from config import get_checkpointer
+    _csr_graph = build_csr_graph(checkpointer=get_checkpointer())
+    print("[Startup] PostgresSaver ready")
+    yield
+
+app = FastAPI(title="电商智能客服系统", version="1.0", lifespan=lifespan)
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -36,14 +44,64 @@ async def index():
 
 # ── 全局图实例（启动时用同步 PostgresSaver 初始化）─────────────────────────
 _csr_graph = None
+# session_id -> phone 映射（存服务端内存，不写入 State 防止泄漏到 LLM）
+_session_phones: dict[str, str] = {}
 
 
-@app.on_event("startup")
-def _init_graph():
-    global _csr_graph
-    from config import get_checkpointer
-    _csr_graph = build_csr_graph(checkpointer=get_checkpointer())
-    print("[Startup] PostgresSaver 已就绪")
+def _get_config(session_id: str, phone_hint: str = "") -> dict:
+    phone = _session_phones.get(session_id, "")
+    # 兜底：前端把手机号存在 sessionStorage，请求时带上
+    if not phone and phone_hint and len(phone_hint) == 11 and phone_hint.isdigit():
+        _session_phones[session_id] = phone_hint
+        phone = phone_hint
+    return {"configurable": {"thread_id": session_id, "user_phone": phone}}
+
+
+def _make_initial_state(message: str, session_id: str) -> dict:
+    return {
+        "messages": [HumanMessage(content=message)],
+        "intent": "", "iteration_count": 0, "next_agent": "",
+        "user_phone": _session_phones.get(session_id, ""),
+    }
+
+
+
+
+# ── 用户登录 ────────────────────────────────────────────────────────────────────
+@app.post("/api/login/{session_id}")
+async def login(session_id: str, request: Request):
+    """前端提交手机号，后端验证并绑定到 session"""
+    body = await request.json()
+    phone = body.get("phone", "").strip()
+    if not phone or len(phone) != 11 or not phone.isdigit():
+        raise HTTPException(status_code=400, detail="请输入有效的11位手机号")
+
+    from database import find_user_by_phone
+    user = find_user_by_phone(phone)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"未找到手机号 {phone} 对应的用户")
+
+    _session_phones[session_id] = phone
+    return JSONResponse({
+        "logged_in": True,
+        "phone": phone,
+        "user_name": user.name,
+    })
+
+
+@app.get("/api/login/{session_id}")
+async def get_login_status(session_id: str):
+    """查询当前 session 的登录状态"""
+    phone = _session_phones.get(session_id, "")
+    if not phone:
+        return JSONResponse({"logged_in": False, "phone": "", "user_name": ""})
+    from database import find_user_by_phone
+    user = find_user_by_phone(phone)
+    return JSONResponse({
+        "logged_in": True,
+        "phone": phone,
+        "user_name": user.name if user else "",
+    })
 
 
 # ── 非流式对话 ──────────────────────────────────────────────────────────────────
@@ -55,21 +113,18 @@ async def chat_non_stream(session_id: str, request: Request):
     if not question:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    config = {"configurable": {"thread_id": session_id}}
+    config = _get_config(session_id)
+    initial_state = _make_initial_state(question, session_id)
 
     def _invoke():
-        return _csr_graph.invoke(
-            {"messages": [HumanMessage(content=question)], "intent": "", "iteration_count": 0, "next_agent": ""},
-            config=config,
-        )
+        return _csr_graph.invoke(initial_state, config=config)
 
     result = await asyncio.to_thread(_invoke)
     answer = result["messages"][-1].content
 
-    # 检查是否有人工审核待处理
     state = _csr_graph.get_state(config)
     pending = None
-    if state.tasks:
+    if state and state.tasks:
         interrupts = state.tasks[0].interrupts
         if interrupts:
             pending = interrupts[0].value
@@ -82,7 +137,7 @@ async def chat_non_stream(session_id: str, request: Request):
 
 # ── SSE 流式对话 ────────────────────────────────────────────────────────────────
 @app.get("/api/chat/{session_id}/stream")
-async def chat_stream(session_id: str, message: str = ""):
+async def chat_stream(session_id: str, message: str = "", phone: str = ""):
     """SSE 流式对话接口"""
     if not message.strip():
         raise HTTPException(status_code=400, detail="消息不能为空")
@@ -90,11 +145,11 @@ async def chat_stream(session_id: str, message: str = ""):
     async def event_generator():
         import queue, threading
 
-        config = {"configurable": {"thread_id": session_id}}
-        initial_state = {
-            "messages": [HumanMessage(content=message)],
-            "intent": "", "iteration_count": 0, "next_agent": "",
-        }
+        config = _get_config(session_id, phone_hint=phone)
+        initial_state = _make_initial_state(message, session_id)
+        # 兜底：如果 phone 参数带了但 _session_phones 是新的，更新 initial_state
+        if phone and not initial_state.get("user_phone"):
+            initial_state["user_phone"] = phone
 
         node_names = {
             "intent_classifier": "正在分析您的问题...",
@@ -117,7 +172,7 @@ async def chat_stream(session_id: str, message: str = ""):
                 # 完成后检查人工审核
                 state = _csr_graph.get_state(config)
                 pending = None
-                if state.tasks:
+                if state and state.tasks:
                     interrupts = state.tasks[0].interrupts
                     if interrupts:
                         pending = interrupts[0].value
@@ -170,7 +225,7 @@ async def chat_stream(session_id: str, message: str = ""):
 @app.post("/api/human/approve/{session_id}")
 async def approve_action(session_id: str):
     """批准待审核操作"""
-    config = {"configurable": {"thread_id": session_id}}
+    config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
     if not state.tasks or not state.tasks[0].interrupts:
@@ -188,7 +243,7 @@ async def approve_action(session_id: str):
 @app.post("/api/human/reject/{session_id}")
 async def reject_action(session_id: str):
     """拒绝待审核操作"""
-    config = {"configurable": {"thread_id": session_id}}
+    config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
     if not state.tasks or not state.tasks[0].interrupts:
@@ -206,11 +261,11 @@ async def reject_action(session_id: str):
 @app.get("/api/human/pending/{session_id}")
 async def check_pending(session_id: str):
     """检查是否有待审核操作"""
-    config = {"configurable": {"thread_id": session_id}}
+    config = _get_config(session_id)
     state = _csr_graph.get_state(config)
 
     pending = None
-    if state.tasks:
+    if state and state.tasks:
         interrupts = state.tasks[0].interrupts
         if interrupts:
             pending = interrupts[0].value
@@ -244,7 +299,7 @@ async def list_sessions():
 @app.get("/api/chat/{session_id}/history")
 async def get_history(session_id: str):
     """获取指定会话的聊天记录"""
-    config = {"configurable": {"thread_id": session_id}}
+    config = _get_config(session_id)
     state = _csr_graph.get_state(config)
 
     messages = []

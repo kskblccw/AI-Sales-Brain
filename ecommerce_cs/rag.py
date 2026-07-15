@@ -468,10 +468,6 @@ AFTERSALE_POLICY_DOC = """
 # ═══════════════════════════════════════════════════════════════════════════════
 # 文档构建函数
 # ═══════════════════════════════════════════════════════════════════════════════
-async def _load_products() -> list:
-    return await _load_products_async()
-
-
 def _build_documents(products: list) -> list[Document]:
     """构建多层知识文档"""
     documents = []
@@ -544,7 +540,17 @@ def build_product_knowledge_base(force: bool = False) -> Chroma:
 
     print("正在构建商品知识库...")
 
-    products = asyncio.run(_load_products())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            products = ex.submit(lambda: asyncio.run(_load_products_async())).result()
+    else:
+        products = asyncio.run(_load_products_async())
     print(f"  [1/3] 加载 {len(products)} 个商品")
 
     documents = _build_documents(products)

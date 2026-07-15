@@ -13,8 +13,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 
-from config import make_llm
-
+from langchain_core.runnables import RunnableConfig
 from config import make_llm
 from agents.order_agent import build_order_agent
 from agents.product_agent import build_product_agent
@@ -28,6 +27,7 @@ class CSRState(TypedDict):
     intent: str            # 用户意图：order/product/aftersale/faq/human
     iteration_count: int   # 子Agent调度轮数
     next_agent: str        # supervisor 决定的下一个Agent
+    user_phone: str        # 当前用户手机号（元数据，不注入 LLM 上下文）
 
 
 # 可用的子Agent列表
@@ -139,25 +139,25 @@ def supervisor_node(state: CSRState) -> dict:
 
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
-def call_order_agent(state: CSRState) -> dict:
+def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
     _safe_print("[Order Agent] 开始处理...")
-    result = _subgraphs["order"].invoke({"messages": state["messages"]})
+    result = _subgraphs["order"].invoke({"messages": state["messages"]}, config)
     last_msg = result["messages"][-1]
     _safe_print(f"[Order Agent] 完成: {str(last_msg.content)[:80]}...")
     return {"messages": [last_msg]}
 
 
-def call_product_agent(state: CSRState) -> dict:
+def call_product_agent(state: CSRState, config: RunnableConfig) -> dict:
     _safe_print("[Product Agent] 开始处理...")
-    result = _subgraphs["product"].invoke({"messages": state["messages"]})
+    result = _subgraphs["product"].invoke({"messages": state["messages"]}, config)
     last_msg = result["messages"][-1]
     _safe_print(f"[Product Agent] 完成: {str(last_msg.content)[:80]}...")
     return {"messages": [last_msg]}
 
 
-def call_aftersale_agent(state: CSRState) -> dict:
+def call_aftersale_agent(state: CSRState, config: RunnableConfig) -> dict:
     _safe_print("[AfterSale Agent] 开始处理...")
-    result = _subgraphs["aftersale"].invoke({"messages": state["messages"]})
+    result = _subgraphs["aftersale"].invoke({"messages": state["messages"]}, config)
     last_msg = result["messages"][-1]
     _safe_print(f"[AfterSale Agent] 完成: {str(last_msg.content)[:80]}...")
 
@@ -173,9 +173,9 @@ def call_aftersale_agent(state: CSRState) -> dict:
     return {"messages": [last_msg]}
 
 
-def call_faq_agent(state: CSRState) -> dict:
+def call_faq_agent(state: CSRState, config: RunnableConfig) -> dict:
     _safe_print("[FAQ Agent] 开始处理...")
-    result = _subgraphs["faq"].invoke({"messages": state["messages"]})
+    result = _subgraphs["faq"].invoke({"messages": state["messages"]}, config)
     last_msg = result["messages"][-1]
     _safe_print(f"[FAQ Agent] 完成: {str(last_msg.content)[:80]}...")
     return {"messages": [last_msg]}
@@ -316,11 +316,12 @@ def build_csr_graph(checkpointer=None):
 def chat(question: str, session_id: str = "default", checkpointer=None) -> str:
     """单次调用（调试用，需传入 checkpointer）"""
     graph = build_csr_graph(checkpointer=checkpointer)
-    config = {"configurable": {"thread_id": session_id}}
+    config = {"configurable": {"thread_id": session_id, "user_phone": ""}}
     result = graph.invoke(
         {
             "messages": [HumanMessage(content=question)],
             "intent": "", "iteration_count": 0, "next_agent": "",
+            "user_phone": "",
         },
         config=config,
     )

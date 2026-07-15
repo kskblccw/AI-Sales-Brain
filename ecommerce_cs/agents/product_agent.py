@@ -6,12 +6,16 @@ product_agent.py — 商品咨询专员子图
 
 from typing import TypedDict, Annotated
 from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from config import make_llm
 from tools.product_tools import PRODUCT_TOOLS
+from tools.auth_tools import AUTH_TOOLS
+
+_AGENT_TOOLS = PRODUCT_TOOLS + AUTH_TOOLS
 
 
 class ProductAgentState(TypedDict):
@@ -21,8 +25,8 @@ class ProductAgentState(TypedDict):
 def build_product_agent() -> StateGraph:
     """构建商品咨询专员子图"""
     llm = make_llm(temperature=0.3)
-    llm_with_tools = llm.bind_tools(PRODUCT_TOOLS)
-    tool_node = ToolNode(PRODUCT_TOOLS)
+    llm_with_tools = llm.bind_tools(_AGENT_TOOLS)
+    tool_node = ToolNode(_AGENT_TOOLS)
 
     SYSTEM_PROMPT = """你是一个电商客服的商品咨询专员。你的职责是帮用户了解商品信息和选购。
 
@@ -39,9 +43,9 @@ def build_product_agent() -> StateGraph:
 4. 对深入问题务必调用 search_product_knowledge_tool，回复末尾加 [DONE]
 """
 
-    def agent_node(state: ProductAgentState) -> dict:
+    def agent_node(state: ProductAgentState, config: RunnableConfig) -> dict:
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        response = llm_with_tools.invoke(messages)
+        response = llm_with_tools.invoke(messages, config)
         return {"messages": [response]}
 
     builder = StateGraph(ProductAgentState)

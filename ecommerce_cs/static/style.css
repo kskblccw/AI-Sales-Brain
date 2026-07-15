@@ -137,12 +137,62 @@ body {
 }
 
 .chat-header {
-  padding: 16px 24px;
+  padding: 12px 24px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-white);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
-.chat-header h1 { font-size: 20px; margin-bottom: 4px; }
-.chat-header p { font-size: 13px; color: var(--text-secondary); }
+.header-left h1 { font-size: 20px; margin-bottom: 2px; }
+.header-left p { font-size: 13px; color: var(--text-secondary); }
+
+.header-right { flex-shrink: 0; }
+
+.login-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.login-box input[type="tel"] {
+  width: 160px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.login-box input[type="tel"]:focus {
+  border-color: var(--primary);
+}
+.btn-login, .btn-logout {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.btn-login {
+  background: var(--primary);
+  color: #fff;
+}
+.btn-login:hover { background: var(--primary-dark); }
+.btn-logout {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn-logout:hover { background: #f5f5f5; }
+
+.login-status {
+  font-size: 13px;
+  color: var(--success);
+  font-weight: 500;
+  white-space: nowrap;
+}
 
 /* === 消息区 === */
 .chat-messages {

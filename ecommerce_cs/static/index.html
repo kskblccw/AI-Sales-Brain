@@ -27,8 +27,18 @@
 <!-- 主聊天区 -->
 <main class="chat-main">
   <header class="chat-header">
-    <h1 id="chatTitle">电商智能客服</h1>
-    <p id="chatSubtitle">AI 助手在线，为您提供订单、商品、售后等全方位服务</p>
+    <div class="header-left">
+      <h1 id="chatTitle">电商智能客服</h1>
+      <p id="chatSubtitle">AI 助手在线，为您提供订单、商品、售后等全方位服务</p>
+    </div>
+    <div class="header-right">
+      <div class="login-box" id="loginBox">
+        <input type="tel" id="phoneInput" placeholder="输入手机号登录" maxlength="11" onkeydown="handlePhoneKey(event)" />
+        <button class="btn-login" id="btnLogin" onclick="doLogin()">登录</button>
+        <span class="login-status" id="loginStatus" style="display:none"></span>
+        <button class="btn-logout" id="btnLogout" onclick="doLogout()" style="display:none">退出</button>
+      </div>
+    </div>
   </header>
 
   <div class="chat-messages" id="chatMessages">

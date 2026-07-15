@@ -106,21 +106,24 @@ class DashScopeEmbeddings(Embeddings):
         self.model = model
         self.api_key = api_key
         self._url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            import httpx
+            self._client = httpx.Client(timeout=30)
+        return self._client
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        import httpx  # 项目已有 httpx 依赖
         if not texts:
             return []
         embeddings = []
         for text in texts:
-            resp = httpx.post(
+            resp = self.client.post(
                 self._url,
-                json={
-                    "model": self.model,
-                    "input": {"texts": [text]},
-                },
+                json={"model": self.model, "input": {"texts": [text]}},
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=30,
             )
             resp.raise_for_status()
             data = resp.json()

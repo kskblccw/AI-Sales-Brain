@@ -11,6 +11,7 @@
 
 // ── 会话管理（localStorage 缓存层，服务端 Postgres 为权威来源）──────────
 const STORAGE_KEY = "ecommerce_cs_sessions";
+const PHONE_STORAGE_KEY = "ecommerce_cs_phone";
 
 function getCachedSessions() {
   try {
@@ -50,13 +51,101 @@ let isProcessing = false;
 // ── 初始化 ──────────────────────────────────────────────────────────────────
 async function init() {
   await loadSessionList();
-  // 如果是已有会话，加载历史
   const currentId = getCurrentSessionId();
   if (currentId) {
     await loadChatHistory(currentId);
   }
+  await checkLoginStatus();
   chatInput.focus();
 }
+
+// ── 手机号登录 ──────────────────────────────────────────────────────────────
+async function doLogin() {
+  const phone = document.getElementById("phoneInput").value.trim();
+  if (!phone || phone.length !== 11 || !/^\d+$/.test(phone)) {
+    alert("请输入有效的11位手机号");
+    return;
+  }
+  const sessionId = getCurrentSessionId();
+  try {
+    const resp = await fetch(`/api/login/${sessionId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      alert(err.detail || "登录失败");
+      return;
+    }
+    const data = await resp.json();
+    showLoggedIn(data.user_name, data.phone);
+  } catch (e) {
+    alert("登录失败: " + e.message);
+  }
+}
+
+async function doLogout() {
+  // 清除当前 session 登录态（新 session）
+  const newId = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+  sessionStorage.setItem("cs_current_session", newId);
+  showLoggedOut();
+  newSession();
+}
+
+async function checkLoginStatus() {
+  const sessionId = getCurrentSessionId();
+  try {
+    const resp = await fetch(`/api/login/${sessionId}`);
+    if (!resp.ok) { showLoggedOut(); return; }
+    const data = await resp.json();
+    if (data.logged_in) {
+      showLoggedIn(data.user_name, data.phone);
+    } else {
+      showLoggedOut();
+    }
+  } catch { showLoggedOut(); }
+}
+
+function showLoggedIn(name, phone) {
+  document.getElementById("phoneInput").style.display = "none";
+  document.getElementById("btnLogin").style.display = "none";
+  document.getElementById("btnLogout").style.display = "inline-block";
+  const status = document.getElementById("loginStatus");
+  status.style.display = "inline";
+  status.textContent = `${name} (${phone.slice(0,3)}****${phone.slice(7)})`;
+  // 存到 sessionStorage，发消息时兜底带上
+  sessionStorage.setItem(PHONE_STORAGE_KEY, phone);
+}
+
+function showLoggedOut() {
+  document.getElementById("phoneInput").style.display = "inline-block";
+  document.getElementById("btnLogin").style.display = "inline-block";
+  document.getElementById("btnLogout").style.display = "none";
+  document.getElementById("loginStatus").style.display = "none";
+  document.getElementById("phoneInput").value = "";
+  sessionStorage.removeItem(PHONE_STORAGE_KEY);
+}
+
+function handlePhoneKey(event) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    doLogin();
+  }
+}
+
+// 监听手机号输入框：输满11位自动登录
+document.addEventListener("DOMContentLoaded", function() {
+  const phoneInput = document.getElementById("phoneInput");
+  if (phoneInput) {
+    phoneInput.addEventListener("input", function() {
+      const phone = this.value.trim();
+      if (phone.length === 11 && /^\d+$/.test(phone)) {
+        doLogin();
+      }
+    });
+  }
+});
 
 // ── 会话列表（从服务器加载，合并本地缓存）─────────────────────────────────
 async function loadSessionList() {
@@ -141,9 +230,9 @@ function deleteLocalSession(event, sessionId) {
 // ── 切换会话（从服务器加载历史，不刷新页面）─────────────────────────────
 async function switchSession(id) {
   setCurrentSessionId(id);
-  // 清空当前消息
   chatMessages.innerHTML = '<div style="text-align:center;padding:20px;color:#aaa;">加载中...</div>';
   approvalBanner.style.display = "none";
+  await checkLoginStatus();  // 每个 session 独立登录态
   await loadSessionList();
   await loadChatHistory(id);
 }
@@ -299,9 +388,13 @@ async function sendMessage() {
 
   currentAssistantBubble = createAssistantBubble();
 
+  // 兜底：把手机号带在请求参数里，防止 session ID 变化导致丢登录态
+  const savedPhone = sessionStorage.getItem(PHONE_STORAGE_KEY) || "";
+  const phoneParam = savedPhone ? `&phone=${encodeURIComponent(savedPhone)}` : "";
+
   try {
     const response = await fetch(
-      `/api/chat/${sessionId}/stream?message=${encodeURIComponent(message)}`
+      `/api/chat/${sessionId}/stream?message=${encodeURIComponent(message)}${phoneParam}`
     );
 
     const reader = response.body.getReader();

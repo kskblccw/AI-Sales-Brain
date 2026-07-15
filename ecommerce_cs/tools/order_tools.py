@@ -1,27 +1,43 @@
 """
 order_tools.py — 订单查询、物流跟踪工具
+
+手机号从 config.configurable.user_phone 静默获取，不暴露给 LLM。
 """
 
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 
 from database import find_order_by_no, find_orders_by_user, find_user_by_phone
 
 
+def _get_phone(config: RunnableConfig) -> str:
+    return (config or {}).get("configurable", {}).get("user_phone", "")
+
+
 @tool
-def query_order(order_no: str) -> str:
+def query_order(order_no: str, config: RunnableConfig = None) -> str:
     """
     根据订单号查询订单详情（含金额、状态、物流和商品明细）。
-    当用户询问某个具体订单的详情时使用。
+    当用户询问某个具体订单时使用。会自动验证订单是否属于当前用户。
 
     Args:
-        order_no: 订单编号，格式如 ORD202401010001
+        order_no: 订单编号，格式如 ORD202607150001
     """
+    phone = _get_phone(config)
+    if not phone:
+        return "您还未登录。请先在前端右上角输入手机号完成登录，我才能帮您查询订单。"
+
     order = find_order_by_no(order_no)
     if not order:
         return f"未找到订单 {order_no}。请确认订单号是否正确。"
 
+    # 验证归属
+    user = find_user_by_phone(phone)
+    if not user or order.user_id != user.id:
+        return f"订单 {order_no} 不属于您（{phone}），请确认订单号。"
+
     items_text = "\n".join(
-        f"  - {item.product.name} × {item.quantity}（¥{item.unit_price}）"
+        f"  - {item.product.name} x {item.quantity}（¥{item.unit_price}）"
         for item in order.items
     )
 
@@ -38,64 +54,72 @@ def query_order(order_no: str) -> str:
 
 
 @tool
-def track_shipment(order_no: str) -> str:
+def track_shipment(order_no: str, config: RunnableConfig = None) -> str:
     """
-    查询订单的物流追踪信息。
-    当用户询问「我的快递到哪了」「物流状态」时使用。
+    查询订单的物流追踪信息。当用户询问「我的快递到哪了」「物流状态」时使用。
+    会自动验证订单是否属于当前用户。
 
     Args:
         order_no: 订单编号
     """
+    phone = _get_phone(config)
+    if not phone:
+        return "您还未登录。请先在前端右上角输入手机号完成登录。"
+
     order = find_order_by_no(order_no)
     if not order:
         return f"未找到订单 {order_no}。"
 
+    user = find_user_by_phone(phone)
+    if not user or order.user_id != user.id:
+        return f"订单 {order_no} 不属于您，请确认订单号。"
+
     if not order.tracking_no:
         return f"订单 {order_no} 暂未发货，当前状态：{order.status.value}。"
 
-    # 模拟物流轨迹（真实场景接入快递100等API）
     import random
-    statuses = [
-        "快递员已揽收",
-        "到达分拣中心",
-        "运输中",
-        "到达目的地分拣中心",
-        "快递员派送中",
-        "已签收",
-    ]
+    statuses = ["快递员已揽收", "到达分拣中心", "运输中", "到达目的地分拣中心", "快递员派送中", "已签收"]
     current_idx = random.randint(2, len(statuses) - 1) if order.status.value == "已发货" else len(statuses) - 1
 
-    lines = [f"物流单号：{order.tracking_no}（{'顺丰速运' if 'SF' in order.tracking_no else '中通快递' if 'ZTO' in order.tracking_no else '圆通速递' if 'YTO' in order.tracking_no else '韵达快递' if 'YD' in order.tracking_no else '京东物流'}）"]
-    from datetime import datetime, timedelta
-    for i in range(current_idx + 1):
-        time = datetime.now() - timedelta(hours=(current_idx - i) * random.randint(2, 12))
-        lines.append(f"  [{time.strftime('%m-%d %H:%M')}] {statuses[i]}")
+    carriers = {"SF": "顺丰速运", "YT": "圆通速递", "ZTO": "中通快递", "JD": "京东物流", "DB": "德邦快递"}
+    carrier_name = "快递"
+    for k, v in carriers.items():
+        if k in order.tracking_no:
+            carrier_name = v
+            break
 
+    from datetime import datetime, timedelta
+    lines = [f"物流单号：{order.tracking_no}（{carrier_name}）"]
+    for i in range(current_idx + 1):
+        t = datetime.now() - timedelta(hours=(current_idx - i) * random.randint(2, 12))
+        lines.append(f"  [{t.strftime('%m-%d %H:%M')}] {statuses[i]}")
     lines.append(f"\n当前状态：{statuses[current_idx]}")
     return "\n".join(lines)
 
 
 @tool
-def list_my_orders(phone: str) -> str:
+def list_my_orders(config: RunnableConfig = None) -> str:
     """
-    查询某用户的所有订单列表。
+    查询当前登录用户的所有订单列表。
     当用户询问「我的订单」「帮我查一下我的订单」时使用。
-
-    Args:
-        phone: 用户手机号
+    无需参数，自动识别当前用户身份。
     """
+    phone = _get_phone(config)
+    if not phone:
+        return "您还未登录。请先在前端右上角输入手机号完成登录，我才能帮您查询订单。"
+
     user = find_user_by_phone(phone)
     if not user:
-        return f"未找到手机号为 {phone} 的用户。请确认手机号是否正确。"
+        return f"未找到手机号 {phone} 对应的用户，请联系人工客服。"
 
     orders = find_orders_by_user(user.id)
     if not orders:
-        return f"用户 {user.name}（{phone}）暂无订单记录。"
+        return f"用户 {user.name} 暂无订单记录。"
 
     lines = [f"用户 {user.name} 的订单列表（共 {len(orders)} 单）："]
     for order in orders:
         items_summary = "、".join(
-            f"{item.product.name}×{item.quantity}"
+            f"{item.product.name}x{item.quantity}"
             for item in order.items
         )
         lines.append(

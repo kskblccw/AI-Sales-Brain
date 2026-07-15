@@ -256,13 +256,16 @@ def target_function(inputs: dict) -> dict:
     from langchain_core.messages import HumanMessage
 
     graph = build_csr_graph(checkpointer=get_checkpointer())
-    config = {"configurable": {"thread_id": f"eval_{hash(question) % 100000}"}}
+    # 评估用固定测试账号（张伟，有15+笔订单）
+    eval_phone = "13800001001"
+    config = {"configurable": {"thread_id": f"eval_{hash(question) % 100000}", "user_phone": eval_phone}}
 
     try:
         result = graph.invoke(
             {
                 "messages": [HumanMessage(content=question)],
                 "intent": "", "iteration_count": 0, "next_agent": "",
+                "user_phone": eval_phone,
             },
             config=config,
         )

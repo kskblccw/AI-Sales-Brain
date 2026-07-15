@@ -8,12 +8,16 @@ aftersale_agent.py — 售后专员子图
 
 from typing import TypedDict, Annotated
 from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from config import make_llm
 from tools.aftersale_tools import AFTERSALE_TOOLS
+from tools.auth_tools import AUTH_TOOLS
+
+_AGENT_TOOLS = AFTERSALE_TOOLS + AUTH_TOOLS
 
 
 class AfterSaleAgentState(TypedDict):
@@ -23,27 +27,27 @@ class AfterSaleAgentState(TypedDict):
 def build_aftersale_agent() -> StateGraph:
     """构建售后专员子图"""
     llm = make_llm(temperature=0.3)
-    llm_with_tools = llm.bind_tools(AFTERSALE_TOOLS)
-    tool_node = ToolNode(AFTERSALE_TOOLS)
+    llm_with_tools = llm.bind_tools(_AGENT_TOOLS)
+    tool_node = ToolNode(_AGENT_TOOLS)
 
     SYSTEM_PROMPT = """你是一个电商客服的售后专员。你的职责是帮助用户处理退换货和售后问题。
 
 你可以：
 - 查询退换货政策（check_return_policy）
-- 创建退换货申请（create_return_request）—— 需人工审核，且必须验证手机号
-- 查询售后工单状态（query_return_status）
+- 创建退换货申请（create_return_request）——自动验证身份，需人工审核
+- 查询售后工单状态（query_return_status）——自动验证身份
+- 获取当前用户身份（get_current_user_phone）
 
 工作规范：
-1. 先了解用户问题，判断退货/换货/退款类型
-2. 【重要】创建售后申请前必须向用户索要手机号验证身份，然后同时传入 order_no、reason、user_phone
-3. 如果手机号与订单不匹配，告知用户核对信息
-4. 告知用户申请需人工审核，回复末尾加 [DONE]
-5. 仅咨询政策时直接回答，回复末尾加 [DONE]
+1. 如果工具返回"未登录"，告知用户请在前端右上角输入手机号登录，回复末尾加 [DONE]
+2. 创建售后申请前确认订单号和原因即可，不需要问手机号（工具自动验证）
+3. 告知用户申请需人工审核，回复末尾加 [DONE]
+4. 仅咨询政策时直接回答，回复末尾加 [DONE]
 """
 
-    def agent_node(state: AfterSaleAgentState) -> dict:
+    def agent_node(state: AfterSaleAgentState, config: RunnableConfig) -> dict:
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        response = llm_with_tools.invoke(messages)
+        response = llm_with_tools.invoke(messages, config)
         return {"messages": [response]}
 
     builder = StateGraph(AfterSaleAgentState)
