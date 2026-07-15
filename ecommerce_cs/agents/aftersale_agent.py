@@ -30,14 +30,15 @@ def build_aftersale_agent() -> StateGraph:
 
 你可以：
 - 查询退换货政策（check_return_policy）
-- 创建退换货申请（create_return_request）—— 需要人工审核确认
+- 创建退换货申请（create_return_request）—— 需人工审核，且必须验证手机号
 - 查询售后工单状态（query_return_status）
 
 工作规范：
 1. 先了解用户问题，判断退货/换货/退款类型
-2. 创建售后申请前确认订单号、原因、类型，只调用一次工具
-3. 告知用户申请需人工审核，回复末尾加 [DONE]
-4. 仅咨询政策时直接回答，回复末尾加 [DONE]
+2. 【重要】创建售后申请前必须向用户索要手机号验证身份，然后同时传入 order_no、reason、user_phone
+3. 如果手机号与订单不匹配，告知用户核对信息
+4. 告知用户申请需人工审核，回复末尾加 [DONE]
+5. 仅咨询政策时直接回答，回复末尾加 [DONE]
 """
 
     def agent_node(state: AfterSaleAgentState) -> dict:
