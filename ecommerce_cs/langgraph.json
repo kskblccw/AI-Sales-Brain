@@ -4,5 +4,6 @@
     "csr_agent": "./deploy_graph.py:graph"
   },
   "env": ".env",
-  "python_version": "3.12"
+  "python_version": "3.12",
+  "image_distro": "wolfi"
 }
