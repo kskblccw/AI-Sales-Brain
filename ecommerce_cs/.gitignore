@@ -4,6 +4,11 @@
 # Chroma 向量库（运行时生成）
 chroma_db/
 
+# LangGraph Cloud 部署产物
+.langgraph_api/
+.langgraph_data/
+.langgraph/
+
 # Python
 __pycache__/
 *.py[cod]

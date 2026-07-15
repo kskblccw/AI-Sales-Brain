@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "csr_agent": "./deploy_graph.py:graph"
+  },
+  "env": ".env",
+  "python_version": "3.12"
+}

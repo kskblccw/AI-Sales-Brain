@@ -304,9 +304,11 @@ def build_csr_graph(checkpointer=None):
     builder.add_edge("human_approval", END)
     builder.add_edge("human_handoff", END)
 
-    # 编译（checkpointer 由调用方注入，server 传入 AsyncPostgresSaver）
+    # 编译
+    # - checkpointer=None（云部署）：LangGraph Cloud 自动注入 PostgresSaver
+    # - checkpointer=实例（本地 server）：由调用方注入
     if checkpointer is None:
-        raise ValueError("checkpointer 不能为 None，请传入 PostgresSaver 或 AsyncPostgresSaver 实例")
+        return builder.compile()  # 云部署：平台注入 checkpointer
     return builder.compile(checkpointer=checkpointer)
 
 
