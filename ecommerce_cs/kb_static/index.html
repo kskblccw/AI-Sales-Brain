@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识库管理</title>
+<style>
+:root { --bg:#f5f5f5; --card:#fff; --primary:#4A90D9; --danger:#FF4D4F; --border:#e0e0e0; --text:#333; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+header { background:var(--card); padding:12px 24px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+header h1 { font-size:20px; }
+.stats { font-size:13px; color:#888; }
+main { max-width:1200px; margin:16px auto; padding:0 16px; }
+.toolbar { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+.toolbar input, .toolbar select { padding:8px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
+.toolbar input[type=text] { width:240px; }
+.btn { padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+.btn-primary { background:var(--primary); color:#fff; }
+.btn-danger { background:var(--danger); color:#fff; }
+.btn-outline { background:transparent; border:1px solid var(--border); }
+.btn:hover { opacity:.85; }
+table { width:100%; border-collapse:collapse; background:var(--card); border-radius:8px; overflow:hidden; }
+th,td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--border); font-size:13px; }
+th { background:#fafafa; font-weight:600; }
+tr:hover { background:#f9f9f9; }
+.content-preview { max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.meta-tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#e8f0fe; color:var(--primary); margin:1px 2px; }
+.meta-tag.custom { background:#fff3e0; color:#e67e00; }
+.pagination { display:flex; justify-content:center; gap:8px; margin-top:16px; }
+.pagination button { padding:6px 12px; border:1px solid var(--border); border-radius:4px; background:var(--card); cursor:pointer; font-size:13px; }
+.pagination button.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+.modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.3); z-index:100; justify-content:center; align-items:center; }
+.modal.show { display:flex; }
+.modal-box { background:var(--card); border-radius:12px; padding:24px; width:600px; max-height:80vh; overflow-y:auto; }
+.modal-box h2 { margin-bottom:16px; }
+.modal-box label { display:block; margin:12px 0 4px; font-size:13px; font-weight:600; }
+.modal-box input, .modal-box textarea, .modal-box select { width:100%; padding:8px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
+.modal-box textarea { height:200px; resize:vertical; font-family:inherit; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+.check-col { width:40px; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>知识库管理</h1>
+  <span class="stats" id="statsBar">加载中...</span>
+</header>
+<main>
+  <div class="toolbar">
+    <input type="text" id="searchInput" placeholder="搜索文档..." onkeydown="if(event.key==='Enter')searchDocs()">
+    <select id="filterCategory" onchange="loadDocs()">
+      <option value="">全部分类</option>
+    </select>
+    <select id="filterType" onchange="loadDocs()">
+      <option value="">全部类型</option>
+      <option value="product_detail">商品详情</option>
+      <option value="buying_guide">选购指南</option>
+      <option value="faq">常见问题</option>
+      <option value="policy">售后政策</option>
+      <option value="custom">自定义</option>
+    </select>
+    <button class="btn btn-primary" onclick="showCreateModal()">+ 新增文档</button>
+    <button class="btn btn-outline" onclick="batchDelete()">批量删除</button>
+    <button class="btn btn-outline" onclick="rebuildKB()" title="从数据库重建全部知识库">重建索引</button>
+  </div>
+  <table>
+    <thead><tr><th class="check-col"><input type="checkbox" onclick="toggleAll(this)"></th><th>内容预览</th><th>分类</th><th>类型</th><th>操作</th></tr></thead>
+    <tbody id="docTable"><tr><td colspan="5" style="text-align:center;color:#aaa;padding:40px">加载中...</td></tr></tbody>
+  </table>
+  <div class="pagination" id="pagination"></div>
+</main>
+
+<!-- 编辑弹窗 -->
+<div class="modal" id="editModal">
+  <div class="modal-box">
+    <h2 id="modalTitle">编辑文档</h2>
+    <input type="hidden" id="editId">
+    <label>分类</label>
+    <select id="editCategory">
+      <option value="手机数码">手机数码</option><option value="电脑办公">电脑办公</option>
+      <option value="家用电器">家用电器</option><option value="服饰鞋包">服饰鞋包</option>
+      <option value="食品生鲜">食品生鲜</option><option value="通用">通用</option>
+    </select>
+    <label>类型</label>
+    <select id="editType">
+      <option value="product_detail">商品详情</option><option value="buying_guide">选购指南</option>
+      <option value="faq">常见问题</option><option value="policy">售后政策</option>
+      <option value="custom">自定义</option>
+    </select>
+    <label>关联商品</label>
+    <input type="text" id="editProduct" placeholder="商品名称（可选）">
+    <label>内容</label>
+    <textarea id="editContent" placeholder="文档内容..."></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" id="btnDelete" style="display:none" onclick="deleteDoc()">删除</button>
+      <button class="btn btn-primary" onclick="saveDoc()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentPage = 1, totalPages = 1;
+
+async function loadStats() {
+  const r = await fetch(API+'/api/stats'); const d = await r.json();
+  document.getElementById('statsBar').textContent =
+    `共 ${d.total} 篇文档 | 分类: ${Object.entries(d.categories).map(([k,v])=>k+':'+v).join(', ')}`;
+  // 填充分类下拉
+  const sel = document.getElementById('filterCategory');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">全部分类</option>' +
+    Object.keys(d.categories).map(c => `<option value="${c}" ${c===current?'selected':''}>${c} (${d.categories[c]})</option>`).join('');
+}
+
+async function loadDocs(page=1) {
+  currentPage = page;
+  const params = new URLSearchParams({page, page_size:15});
+  const c = document.getElementById('filterCategory').value;
+  const t = document.getElementById('filterType').value;
+  if(c) params.set('category',c);
+  if(t) params.set('doc_type',t);
+
+  const r = await fetch(`${API}/api/documents?${params}`);
+  const d = await r.json();
+  totalPages = Math.ceil(d.total / d.page_size);
+
+  const tbody = document.getElementById('docTable');
+  if(d.items.length===0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#aaa;padding:40px">无匹配文档</td></tr>';
+  } else {
+    tbody.innerHTML = d.items.map(item => `
+      <tr>
+        <td class="check-col"><input type="checkbox" value="${item.id}"></td>
+        <td class="content-preview" title="${item.metadata.product_name||''}">${escHtml(item.content)}</td>
+        <td><span class="meta-tag">${item.metadata.category||'-'}</span></td>
+        <td><span class="meta-tag ${item.metadata.doc_type==='custom'?'custom':''}">${item.metadata.doc_type||'-'}</span></td>
+        <td>
+          <button class="btn btn-outline" style="padding:4px 10px;font-size:12px" onclick="showEditModal('${item.id}')">编辑</button>
+        </td>
+      </tr>`).join('');
+  }
+
+  // 分页
+  const pg = document.getElementById('pagination');
+  let html = '';
+  for(let i=1; i<=totalPages; i++) {
+    html += `<button class="${i===page?'active':''}" onclick="loadDocs(${i})">${i}</button>`;
+  }
+  pg.innerHTML = html;
+
+  loadStats();
+}
+
+function escHtml(s) { const d=document.createElement('div'); d.textContent = (s||'').slice(0,200); return d.innerHTML; }
+
+async function searchDocs() {
+  const q = document.getElementById('searchInput').value.trim();
+  if(!q) { loadDocs(); return; }
+  const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&top_k=10`);
+  const d = await r.json();
+  document.getElementById('docTable').innerHTML =
+    '<tr><td colspan="5" style="padding:16px;white-space:pre-wrap;font-size:13px">' + escHtml(d.results || '无结果') + '</td></tr>';
+  document.getElementById('pagination').innerHTML = '';
+}
+
+function toggleAll(cb) {
+  document.querySelectorAll('#docTable input[type=checkbox]').forEach(c => c.checked = cb.checked);
+}
+
+async function batchDelete() {
+  const ids = [...document.querySelectorAll('#docTable input[type=checkbox]:checked')].map(c => c.value);
+  if(!ids.length) { alert('请先勾选要删除的文档'); return; }
+  if(!confirm(`确定删除 ${ids.length} 篇文档？`)) return;
+  await fetch(`${API}/api/documents?ids=${ids.join(',')}`, {method:'DELETE'});
+  loadDocs(currentPage);
+}
+
+async function showCreateModal() {
+  document.getElementById('modalTitle').textContent = '新增文档';
+  document.getElementById('editId').value = '';
+  document.getElementById('editContent').value = '';
+  document.getElementById('editCategory').value = '通用';
+  document.getElementById('editType').value = 'custom';
+  document.getElementById('editProduct').value = '';
+  document.getElementById('btnDelete').style.display = 'none';
+  document.getElementById('editModal').classList.add('show');
+}
+
+async function showEditModal(id) {
+  const r = await fetch(`${API}/api/documents/${id}`); const d = await r.json();
+  document.getElementById('modalTitle').textContent = '编辑文档';
+  document.getElementById('editId').value = d.id;
+  document.getElementById('editContent').value = d.content;
+  document.getElementById('editCategory').value = d.metadata.category || '通用';
+  document.getElementById('editType').value = d.metadata.doc_type || 'custom';
+  document.getElementById('editProduct').value = d.metadata.product_name || '';
+  document.getElementById('btnDelete').style.display = 'inline-block';
+  document.getElementById('editModal').classList.add('show');
+}
+
+function closeModal() { document.getElementById('editModal').classList.remove('show'); }
+
+async function saveDoc() {
+  const id = document.getElementById('editId').value;
+  const body = {
+    content: document.getElementById('editContent').value,
+    category: document.getElementById('editCategory').value,
+    doc_type: document.getElementById('editType').value,
+    product_name: document.getElementById('editProduct').value,
+  };
+  const method = id ? 'PUT' : 'POST';
+  const url = id ? `${API}/api/documents/${id}` : `${API}/api/documents`;
+  await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  closeModal();
+  loadDocs(currentPage);
+}
+
+async function deleteDoc() {
+  if(!confirm('确定删除此文档？此操作不可恢复。')) return;
+  const id = document.getElementById('editId').value;
+  await fetch(`${API}/api/documents/${id}`, {method:'DELETE'});
+  closeModal();
+  loadDocs(currentPage);
+}
+
+async function rebuildKB() {
+  if(!confirm('重建索引将从数据库重新生成所有知识库文档，可能耗时较长。确定继续？')) return;
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = '重建中...';
+  await fetch(`${API}/api/rebuild`, {method:'POST'});
+  btn.disabled = false; btn.textContent = '重建索引';
+  loadDocs(1);
+}
+
+loadDocs();
+</script>
+</body>
+</html>
