@@ -56,6 +56,11 @@ async function init() {
     await loadChatHistory(currentId);
   }
   await checkLoginStatus();
+  // 演示：未登录时预填测试手机号（checkLoginStatus 之后，避免被 showLoggedOut 清空）
+  var pi = document.getElementById("phoneInput");
+  if (pi && pi.style.display !== "none" && !pi.value) {
+    pi.value = "13800001001";
+  }
   chatInput.focus();
 }
 
@@ -133,18 +138,6 @@ function handlePhoneKey(event) {
   }
 }
 
-// 监听手机号输入框：输满11位自动登录
-document.addEventListener("DOMContentLoaded", function() {
-  const phoneInput = document.getElementById("phoneInput");
-  if (phoneInput) {
-    phoneInput.addEventListener("input", function() {
-      const phone = this.value.trim();
-      if (phone.length === 11 && /^\d+$/.test(phone)) {
-        doLogin();
-      }
-    });
-  }
-});
 
 // ── 会话列表（从服务器加载，合并本地缓存）─────────────────────────────────
 async function loadSessionList() {
