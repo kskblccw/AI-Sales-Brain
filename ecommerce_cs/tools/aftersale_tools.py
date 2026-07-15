@@ -97,12 +97,10 @@ def create_return_request(
     return f"""
 身份验证通过（{user.name}）
 
-售后申请已提交！
 申请编号：{req.return_no} | 订单号：{order_no}
 售后类型：{return_type} | 原因：{reason}
-当前状态：待审核
 
-客服将在1-2个工作日内完成审核。此申请需人工审核确认后方可生效。
+⚠️ 请在确认弹窗中点击"确认"以提交此售后申请。
 """.strip()
 
 

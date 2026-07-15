@@ -71,6 +71,7 @@ def _make_initial_state(message: str, session_id: str) -> dict:
         "intent": "", "iteration_count": 0, "next_agent": "",
         "user_phone": _session_phones.get(session_id, ""),
         "summary": "", "user_profile_json": "",
+        "approval_decision": "", "approval_meta": "",
     }
 
 
@@ -160,7 +161,6 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
 
         config = _get_config(session_id, phone_hint=phone)
         initial_state = _make_initial_state(message, session_id)
-        # 兜底：如果 phone 参数带了但 _session_phones 是新的，更新 initial_state
         if phone and not initial_state.get("user_phone"):
             initial_state["user_phone"] = phone
 
@@ -171,32 +171,26 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
             "product_agent": "正在为您查找商品...",
             "aftersale_agent": "正在处理售后请求...",
             "faq_agent": "正在搜索常见问题...",
-            "human_approval": "等待人工审核...",
+            "human_approval": "等待您确认操作...",
             "human_handoff": "正在转接人工客服...",
         }
 
         q = queue.Queue()
-        error_holder = []
+        stream_active = True
 
         def run_graph():
+            nonlocal stream_active
             try:
-                # messages 逐 token + updates 节点状态 → 返回 (ns, mode, data) 三元组
-                for ns, mode, data in _csr_graph.stream(
+                for _, mode, data in _csr_graph.stream(
                     initial_state, config=config,
                     stream_mode=["messages", "updates"],
                     subgraphs=True,
                 ):
-                    q.put((mode, data))
-
-                state = _csr_graph.get_state(config)
-                pending = None
-                if state and state.tasks:
-                    interrupts = state.tasks[0].interrupts
-                    if interrupts:
-                        pending = interrupts[0].value
-                q.put(("done", pending))
+                    q.put(("stream", (mode, data)))
+                stream_active = False
+                q.put(("stream_done", None))  # 通知主循环 stream 正常结束
             except Exception as e:
-                error_holder.append(e)
+                stream_active = False
                 q.put(("error", str(e)))
 
         thread = threading.Thread(target=run_graph, daemon=True)
@@ -204,42 +198,61 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
 
         try:
             while True:
-                item = await asyncio.to_thread(q.get)
-                mode, data = item
+                try:
+                    item = await asyncio.to_thread(q.get, timeout=0.3)
+                except queue.Empty:
+                    # stream 被 interrupt_before 阻塞 → 轮询检查中断状态
+                    if stream_active:
+                        state = _csr_graph.get_state(config)
+                        if state and state.tasks:
+                            interrupts = state.tasks[0].interrupts
+                            if interrupts:
+                                yield {"event": "approval_required", "data": json.dumps(
+                                    {"type": "approval_required", "data": interrupts[0].value},
+                                    ensure_ascii=False, default=str)}
+                                yield {"event": "done", "data": json.dumps({"type": "done"})}
+                                break
+                    continue
 
-                if mode == "messages":
-                    chunk, meta = data
-                    node_name = meta.get("langgraph_node", "")
-                    # 白名单：子 Agent 内部 LLM 节点名叫 "agent"，只放行它
-                    if node_name != "agent":
-                        continue
-                    if hasattr(chunk, "content") and chunk.content:
-                        text = str(chunk.content)
-                        # 过滤 [系统记忆] 和纯意图标签
-                        if text.startswith("[系统记忆]") or text.strip() in ("order", "product", "aftersale", "faq", "human", "FINISH"):
+                mode, raw = item
+
+                if mode == "stream":
+                    mode, data = raw
+                    if mode == "messages":
+                        chunk, meta = data
+                        node_name = meta.get("langgraph_node", "")
+                        if node_name != "agent":
                             continue
-                        yield {"event": "token", "data": json.dumps(
-                            {"type": "token", "content": text}, ensure_ascii=False)}
+                        if hasattr(chunk, "content") and chunk.content:
+                            text = str(chunk.content)
+                            if text.startswith("[系统记忆]") or text.strip() in ("order", "product", "aftersale", "faq", "human", "FINISH"):
+                                continue
+                            yield {"event": "token", "data": json.dumps(
+                                {"type": "token", "content": text}, ensure_ascii=False)}
 
-                elif mode == "updates":
-                    for node_name, node_output in data.items():
-                        label = node_names.get(node_name, node_name)
-                        # 跳过 prepare_context 和 compress_memory 的状态展示
-                        if node_name in ("prepare_context", "compress_memory"):
-                            continue
-                        yield {"event": "status", "data": json.dumps(
-                            {"type": "status", "node": node_name, "label": label}, ensure_ascii=False)}
+                    elif mode == "updates":
+                        for node_name, node_output in data.items():
+                            if node_name in ("prepare_context", "compress_memory"):
+                                continue
+                            label = node_names.get(node_name, node_name)
+                            yield {"event": "status", "data": json.dumps(
+                                {"type": "status", "node": node_name, "label": label}, ensure_ascii=False)}
 
-                elif mode == "done":
-                    if data:
-                        yield {"event": "approval_required", "data": json.dumps(
-                            {"type": "approval_required", "data": data}, ensure_ascii=False, default=str)}
+                elif mode == "stream_done":
+                    # stream 结束，检查 interrupt_before 是否留下了待处理中断
+                    state = _csr_graph.get_state(config)
+                    if state and state.tasks:
+                        interrupts = state.tasks[0].interrupts
+                        if interrupts:
+                            yield {"event": "approval_required", "data": json.dumps(
+                                {"type": "approval_required", "data": interrupts[0].value},
+                                ensure_ascii=False, default=str)}
                     yield {"event": "done", "data": json.dumps({"type": "done"})}
                     break
 
                 elif mode == "error":
                     yield {"event": "error", "data": json.dumps(
-                        {"type": "error", "message": data[:200]}, ensure_ascii=False)}
+                        {"type": "error", "message": raw[:200]}, ensure_ascii=False)}
                     break
 
         except Exception as e:
@@ -254,37 +267,37 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
 # ── 人工审核接口 ────────────────────────────────────────────────────────────────
 @app.post("/api/human/approve/{session_id}")
 async def approve_action(session_id: str):
-    """批准待审核操作"""
+    """用户点击确认"""
     config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
     if not state or not state.tasks or not state.tasks[0].interrupts:
-        raise HTTPException(status_code=400, detail="该会话没有待审核的操作")
+        raise HTTPException(status_code=400, detail="该会话没有待确认的操作")
 
     from langgraph.types import Command
     result = _csr_graph.invoke(Command(resume="approve"), config=config)
 
     return JSONResponse({
         "result": "approved",
-        "answer": result["messages"][-1].content if result.get("messages") else "审核完成",
+        "answer": result["messages"][-1].content if result.get("messages") else "确认完成",
     })
 
 
 @app.post("/api/human/reject/{session_id}")
 async def reject_action(session_id: str):
-    """拒绝待审核操作"""
+    """用户点击取消"""
     config = _get_config(session_id)
 
     state = _csr_graph.get_state(config)
     if not state or not state.tasks or not state.tasks[0].interrupts:
-        raise HTTPException(status_code=400, detail="该会话没有待审核的操作")
+        raise HTTPException(status_code=400, detail="该会话没有待确认的操作")
 
     from langgraph.types import Command
     result = _csr_graph.invoke(Command(resume="reject"), config=config)
 
     return JSONResponse({
         "result": "rejected",
-        "answer": result["messages"][-1].content if result.get("messages") else "审核完成",
+        "answer": result["messages"][-1].content if result.get("messages") else "已取消",
     })
 
 
@@ -358,6 +371,46 @@ async def get_history(session_id: str):
             messages.append({"role": role, "content": content})
 
     return JSONResponse({"session_id": session_id, "messages": messages})
+
+
+# ── 后台记忆压缩（异步，不阻塞主流程）──────────────────────────────────────────
+@app.post("/api/chat/{session_id}/compress")
+async def compress_session(session_id: str, request: Request):
+    """
+    后台异步压缩会话记忆。
+
+    前端在用户收到 AI 回复后触发（输入框聚焦 / 开始打字时），
+    后端在独立线程中运行压缩，完全不影响当前主图。
+
+    压缩结果（摘要 + 用户画像）存入 PostgreSQL user_profiles 表，
+    下次对话时 prepare_context_node 直接从 DB 读取。
+    """
+    body = await request.json()
+    phone = body.get("phone", "").strip() or _session_phones.get(session_id, "")
+
+    if not phone:
+        return JSONResponse({"compressed": False, "reason": "not logged in"})
+
+    config = _get_config(session_id, phone_hint=phone)
+    state = _csr_graph.get_state(config)
+
+    if not state or not state.values:
+        return JSONResponse({"compressed": False, "reason": "no state"})
+
+    messages = state.values.get("messages", [])
+    if not messages:
+        return JSONResponse({"compressed": False, "reason": "no messages"})
+
+    from memory import compress_and_save
+
+    def _run():
+        return compress_and_save(phone, list(messages))
+
+    new_summary = await asyncio.to_thread(_run)
+    return JSONResponse({
+        "compressed": True,
+        "summary_len": len(new_summary),
+    })
 
 
 @app.get("/api/debug/checkpoints")

@@ -130,4 +130,58 @@ def list_my_orders(config: RunnableConfig = None) -> str:
     return "\n".join(lines)
 
 
-ORDER_TOOLS = [query_order, track_shipment, list_my_orders]
+@tool
+def modify_shipping_address(order_no: str, new_address: str, config: RunnableConfig = None) -> str:
+    """
+    修改订单的收货地址。仅未发货的订单可修改。
+    当用户要求"改地址""修改收货地址""换地址"时使用。会自动验证订单归属。
+
+    Args:
+        order_no: 订单编号
+        new_address: 新的收货地址（完整地址）
+    """
+    phone = _get_phone(config)
+    if not phone:
+        return "您还未登录。请先在前端右上角输入手机号完成登录。"
+
+    user = find_user_by_phone(phone)
+    if not user:
+        return f"未找到手机号 {phone} 对应的用户。"
+
+    order = find_order_by_no(order_no)
+    if not order:
+        return f"未找到订单 {order_no}。请确认订单号。"
+
+    if order.user_id != user.id:
+        return f"订单 {order_no} 不属于您，请确认订单号。"
+
+    if order.status.value in ("已完成", "已取消"):
+        return f"订单 {order_no} 当前状态为「{order.status.value}」，无法修改地址。"
+
+    if order.status.value == "已发货":
+        return f"订单 {order_no} 已发货，无法修改地址。建议联系快递公司转寄或联系人工客服 400-888-8888。"
+
+    from database import update_order_address_sync
+    import random
+    from datetime import datetime
+
+    old_address = order.address
+    ok = update_order_address_sync(order.id, new_address)
+    if not ok:
+        return f"修改地址失败，请稍后重试或联系人工客服。"
+
+    addr_no = f"ADDR{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(10, 99)}"
+
+    return f"""
+身份验证通过（{user.name}）
+
+申请编号：{addr_no} | 订单号：{order_no}
+操作类型：地址修改
+旧地址：{old_address}
+新地址：{new_address}
+
+⚠️ 请在确认弹窗中点击"确认"以提交地址修改。
+""".strip()
+
+
+ORDER_TOOLS = [query_order, track_shipment, list_my_orders, modify_shipping_address]

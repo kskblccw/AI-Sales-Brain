@@ -251,6 +251,40 @@ def compress_history(conversation: list[BaseMessage], existing_summary: str = ""
     return new_summary[:300]  # 硬截断
 
 
+def compress_and_save(phone: str, messages: list[BaseMessage]) -> str:
+    """
+    后台异步压缩：压缩对话历史 + 抽取用户画像 → 存入 DB
+
+    在后台线程中调用，不阻塞主流程。压缩结果存入 user_profiles 表，
+    下次对话时 prepare_context_node 直接从 DB 读取。
+
+    Args:
+        phone: 用户手机号
+        messages: 完整的消息列表
+
+    Returns:
+        新的摘要文本
+    """
+    user_id = _user_id_from_phone(phone)
+    window = apply_sliding_window(messages, window_size=12)
+
+    # 加载已有摘要
+    profile = load_profile(user_id)
+    old_summary = profile.get("summary", "")
+
+    # 压缩历史
+    new_summary = compress_history(window, old_summary)
+
+    # 抽取用户画像（同时保存摘要到 DB）
+    extract_user_profile(user_id, window)
+    # 把摘要也持久化到 profile
+    profile = load_profile(user_id)
+    profile["summary"] = new_summary
+    save_profile(user_id, profile)
+
+    return new_summary
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 上下文构建器（给 Agent 的最终 context）
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -259,19 +293,22 @@ def build_context_injection(user_id: str, summary: str = "") -> str:
     构建注入 System Prompt 的上下文块
 
     包含：
-    - 历史摘要（如有）
+    - 历史摘要（优先用传入的 summary，否则从 DB 读取）
     - 用户画像（格式化为 <300 token）
 
     返回：拼入 prompt 的文本片段
     """
     parts = []
 
-    # 历史情景摘要
-    if summary:
-        parts.append(f"【历史对话摘要】{summary}")
+    # 用户画像（一次 DB 查询同时取摘要和画像）
+    profile = load_profile(user_id)
+
+    # 历史情景摘要：优先用传入的，否则从 DB 读取（后台压缩已存入）
+    effective_summary = summary or profile.get("summary", "")
+    if effective_summary:
+        parts.append(f"【历史对话摘要】{effective_summary}")
 
     # 用户画像
-    profile = load_profile(user_id)
     prefs = profile.get("preferences", [])
     facts = profile.get("facts", {})
     weight = profile.get("weight", 0)

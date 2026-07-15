@@ -246,6 +246,17 @@ def find_return_by_no(return_no: str) -> Optional[ReturnRequest]:
         return result.scalar_one_or_none()
 
 
+def update_order_address_sync(order_id: int, new_address: str) -> bool:
+    """更新订单收货地址（仅未发货订单可修改）"""
+    with SyncSessionFactory() as db:
+        order = db.execute(select(Order).where(Order.id == order_id)).scalar_one_or_none()
+        if not order:
+            return False
+        order.address = new_address
+        db.commit()
+        return True
+
+
 # ── 异步 CRUD 函数（供 rag.py / FastAPI 后台任务使用）─────────────────────
 
 async def _load_products_async() -> List[Product]:

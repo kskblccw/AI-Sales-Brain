@@ -265,7 +265,8 @@ def target_function(inputs: dict) -> dict:
             {
                 "messages": [HumanMessage(content=question)],
                 "intent": "", "iteration_count": 0, "next_agent": "",
-                "user_phone": eval_phone,
+                "user_phone": eval_phone, "summary": "", "user_profile_json": "",
+                "approval_decision": "", "approval_meta": "",
             },
             config=config,
         )

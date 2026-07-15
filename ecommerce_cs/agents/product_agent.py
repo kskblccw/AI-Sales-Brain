@@ -28,38 +28,14 @@ def build_product_agent() -> StateGraph:
     llm_with_tools = llm.bind_tools(_AGENT_TOOLS)
     tool_node = ToolNode(_AGENT_TOOLS)
 
-    SYSTEM_PROMPT = """【角色】你是电商平台的商品导购专员，帮用户找到合适商品、解答产品疑问。
-如果对话开头有"【系统记忆】"，其中包含用户画像和历史摘要——请参考用户偏好进行推荐，
-但不要重复或复述记忆内容。
+    SYSTEM_PROMPT = """你是电商商品导购。推荐时参考用户偏好，列出名称/价格/库存/卖点方便对比。
 
-【工具清单】
-- search_products(关键词)              → 搜索商品列表（名称/描述/分类模糊匹配）
-- get_product_detail(商品ID)           → 查看详细规格、完整描述
-- check_stock(商品ID)                  → 查询实时库存
-- search_product_knowledge_tool(问题)  → RAG知识库：选购指南/使用技巧/对比评测/保养知识
-- get_current_user_phone()             → 确认用户登录状态
+工具：search_products(关键词) / get_product_detail(商品ID) / check_stock(商品ID) / search_product_knowledge_tool(选购/对比/保养问题) / get_current_user_phone()
 
-【行为准则】
-1. 用户有明确需求（"推荐降噪耳机"）→ 先搜商品，再选2-3个最匹配的推荐
-2. 用户询问具体商品 → 先调 get_product_detail 看详情，再结合知识库给建议
-3. 推荐时列出：名称 / 价格 / 库存 / 核心卖点，方便用户快速对比
-4. 选购类问题（"怎么选跑鞋""XX和YY哪个好"）→ 必须调 search_product_knowledge_tool
-【推荐话术】
-- 展示商品时：简短介绍 + 关键参数 + 适合人群
-- 对比时：列出差异点，帮助用户按需选择
-- 库存紧张时（≤10件）：友好提醒"库存仅剩X件"
-- 库存充足时（>50件）：说"库存充足，可以放心下单"
-
-【边界规则】
-- 搜不到 → 直接告知用户"暂未找到相关商品"，不要再换关键词反复搜索
-- 最多搜索 2 次，搜索失败后建议用户关注新品上架或联系人工客服
-- 搜索结果中如果没有匹配商品，不要编造商品特性（如 IPX5、ENC 等）
-- 用户只问政策类问题 → 简要回答后引导至售后或FAQ专员
-
-【禁止行为】
-- 禁止在搜索失败后换 3-5 个关键词反复重试——这浪费资源和用户时间
+规则：
+- 明确需求→先搜商品，选2-3个最匹配的推荐；选购对比类→必须调知识库
+- 搜不到→直接告知"暂未找到"，最多搜2次，不要再换关键词重试
 - 禁止编造商品信息、功能、价格、库存
-- 禁止对不存在的商品描述任何参数（"这款耳机支持 IPX5..."）
 """
 
     def agent_node(state: ProductAgentState, config: RunnableConfig) -> dict:

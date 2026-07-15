@@ -16,8 +16,7 @@ from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
 from config import make_llm
 from memory import (
-    build_context_injection, compress_history, extract_user_profile,
-    apply_sliding_window, _user_id_from_phone,
+    build_context_injection, _user_id_from_phone,
 )
 from agents.order_agent import build_order_agent
 from agents.product_agent import build_product_agent
@@ -34,6 +33,8 @@ class CSRState(TypedDict):
     user_phone: str        # 当前用户手机号（元数据）
     summary: str           # 历史对话摘要（压缩后）
     user_profile_json: str # 用户画像 JSON（压缩后）
+    approval_decision: str # 人工审核决策：approve / reject / ""
+    approval_meta: str     # 审核元数据 JSON（如回滚信息）
 
 
 # 可用的子Agent列表
@@ -184,49 +185,24 @@ def supervisor_node(state: CSRState) -> dict:
 # ── 记忆系统节点 ────────────────────────────────────────────────────────────────
 def prepare_context_node(state: CSRState) -> dict:
     """
-    每轮对话开始时：注入历史摘要 + 用户画像到对话开头
-    不重复注入（只在 state 中没有注入标记时执行）
+    每轮对话开始时：从 DB 注入历史摘要 + 用户画像到对话开头
+    摘要由后台异步压缩写入 DB，此处只读取。
     """
     phone = state.get("user_phone", "")
-    summary = state.get("summary", "")
 
     if not phone:
         return {}
 
     user_id = _user_id_from_phone(phone)
-    injection = build_context_injection(user_id, summary)
+    # 不传 summary 参数 → build_context_injection 从 DB 读取（后台压缩已存入）
+    injection = build_context_injection(user_id)
 
     if not injection:
         return {}
 
-    # 检查是否已经注入过（避免重复）
     msg = SystemMessage(content=f"[系统记忆]\n{injection}\n\n请根据以上用户画像和历史摘要提供个性化服务。")
 
     return {"messages": [msg]}
-
-
-def compress_memory_node(state: CSRState) -> dict:
-    """
-    对话结束后：压缩历史 → 更新摘要，抽取用户画像
-    """
-    phone = state.get("user_phone", "")
-    if not phone:
-        return {}
-
-    user_id = _user_id_from_phone(phone)
-
-    # 滑动窗口：取最近 12 条消息用于压缩
-    all_msgs = state.get("messages", [])
-    window = apply_sliding_window(all_msgs, window_size=12)
-
-    old_summary = state.get("summary", "")
-    new_summary = compress_history(window, old_summary)
-
-    # 抽取用户画像
-    extract_user_profile(user_id, window)
-
-    _safe_print(f"[Memory] 摘要已更新 ({len(new_summary)}字)")
-    return {"summary": new_summary}
 
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
@@ -244,7 +220,29 @@ def _invoke_subgraph(name: str, state: CSRState, config: RunnableConfig) -> dict
 
 
 def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
-    return _invoke_subgraph("order", state, config)
+    result = _invoke_subgraph("order", state, config)
+    last_msg = result["messages"][-1]
+
+    # 检查是否需要人工审核（地址修改等敏感操作，包含"申请编号"即触发）
+    content = str(last_msg.content) if last_msg.content else ""
+    if "申请编号" in content:
+        _safe_print("[Order Agent] 敏感操作需人工审核，路由至 human_approval")
+        # 提取回滚所需信息
+        import re, json as _json
+        meta = {}
+        m = re.search(r"订单号：(\w+)", content)
+        if m:
+            meta["order_no"] = m.group(1)
+        m = re.search(r"旧地址：(.+?)(?:\n|$)", content)
+        if m:
+            meta["old_address"] = m.group(1).strip()
+        return {
+            "messages": [last_msg],
+            "next_agent": "human_approval",
+            "approval_meta": _json.dumps(meta, ensure_ascii=False) if meta else "",
+        }
+
+    return result
 
 
 def call_product_agent(state: CSRState, config: RunnableConfig) -> dict:
@@ -271,30 +269,51 @@ def call_faq_agent(state: CSRState, config: RunnableConfig) -> dict:
     return _invoke_subgraph("faq", state, config)
 
 
-# ── 人工审核节点 ────────────────────────────────────────────────────────────────
+# ── 用户确认节点 ────────────────────────────────────────────────────────────────
 def human_approval_node(state: CSRState) -> dict:
     """
-    人工审核节点：使用 interrupt() 暂停图执行，等待人工确认
-    当人工通过 /api/human/approve 确认后，图继续执行
+    用户确认节点：interrupt() 暂停 → 前端弹窗 → 用户点确认/取消 → resume
     """
-    last_msg = state["messages"][-1].content if state["messages"] else ""
+    import json as _json
 
-    # interrupt 会暂停图并向外传递审核信息
-    approval_result = interrupt({
-        "type": "human_approval",
-        "message": "售后申请需要人工审核确认",
+    last_msg = state["messages"][-1].content if state["messages"] else ""
+    meta_raw = state.get("approval_meta", "")
+
+    decision = interrupt({
+        "type": "user_confirm",
+        "message": "请确认此操作",
         "details": str(last_msg)[:500],
     })
 
-    if approval_result == "approve":
-        response = ("✅ 您的售后申请已通过人工审核！"
-                    "请按提示将商品寄回，我们收到后将在1-3个工作日内完成处理。"
-                    "如有疑问请随时联系我们。")
-    else:
-        response = ("您的售后申请未通过审核。"
-                    "如有疑问请联系人工客服 400-888-8888。")
+    meta = {}
+    if meta_raw:
+        try:
+            meta = _json.loads(meta_raw)
+        except _json.JSONDecodeError:
+            pass
 
-    return {"messages": [AIMessage(content=response)]}
+    is_address = "地址" in str(last_msg) or bool(meta.get("order_no"))
+
+    if decision == "approve":
+        if is_address:
+            response = "✅ 已确认，收货地址已更新。"
+        else:
+            response = ("✅ 售后申请已提交！请按提示将商品寄回，"
+                        "我们收到后将在1-3个工作日内完成处理。")
+    else:
+        if is_address:
+            old_addr = meta.get("old_address", "")
+            order_no = meta.get("order_no", "")
+            if old_addr and order_no:
+                from database import find_order_by_no, update_order_address_sync
+                order = find_order_by_no(order_no)
+                if order:
+                    update_order_address_sync(order.id, old_addr)
+            response = "已取消，地址未修改。"
+        else:
+            response = "已取消，售后申请未提交。如需帮助请联系客服 400-888-8888。"
+
+    return {"messages": [AIMessage(content=response)], "approval_meta": ""}
 
 
 # ── 转人工节点 ──────────────────────────────────────────────────────────────────
@@ -350,7 +369,6 @@ def build_csr_graph(checkpointer=None):
     builder.add_node("faq_agent", call_faq_agent)
     builder.add_node("human_approval", human_approval_node)
     builder.add_node("human_handoff", human_handoff_node)
-    builder.add_node("compress_memory", compress_memory_node)
 
     # 连接边：START → pre_router → prepare_context → [命中→supervisor | 未命中→LLM→supervisor]
     builder.add_edge(START, "pre_router")
@@ -361,7 +379,7 @@ def build_csr_graph(checkpointer=None):
     })
     builder.add_edge("intent_classifier", "supervisor")
 
-    # Supervisor 路由
+    # Supervisor 路由（FINISH 直达 END，压缩摘要由后台 API 异步处理）
     builder.add_conditional_edges(
         "supervisor",
         route_by_next_agent,
@@ -372,12 +390,9 @@ def build_csr_graph(checkpointer=None):
             "faq": "faq_agent",
             "human": "human_handoff",
             "human_approval": "human_approval",
-            "FINISH": "compress_memory",
+            "FINISH": END,
         },
     )
-
-    # compress_memory → END
-    builder.add_edge("compress_memory", END)
 
     # 子Agent执行后回 Supervisor（或去人工审核）
     builder.add_conditional_edges(
@@ -401,15 +416,13 @@ def build_csr_graph(checkpointer=None):
         {"supervisor": "supervisor", "human_approval": "human_approval"},
     )
 
-    # 人工节点 → 压缩记忆 → 结束
-    builder.add_edge("human_approval", "compress_memory")
-    builder.add_edge("human_handoff", "compress_memory")
+    # 人工节点 → 直接结束（压缩摘要由后台 API 异步处理）
+    builder.add_edge("human_approval", END)
+    builder.add_edge("human_handoff", END)
 
     # 编译
-    # - checkpointer=None（云部署）：LangGraph Cloud 自动注入 PostgresSaver
-    # - checkpointer=实例（本地 server）：由调用方注入
     if checkpointer is None:
-        return builder.compile()  # 云部署：平台注入 checkpointer
+        return builder.compile()
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -423,6 +436,7 @@ def chat(question: str, session_id: str = "default", checkpointer=None) -> str:
             "messages": [HumanMessage(content=question)],
             "intent": "", "iteration_count": 0, "next_agent": "",
             "user_phone": "", "summary": "", "user_profile_json": "",
+            "approval_decision": "", "approval_meta": "",
         },
         config=config,
     )

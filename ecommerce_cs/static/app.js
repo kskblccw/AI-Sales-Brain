@@ -379,6 +379,8 @@ async function sendMessage() {
   btnSend.disabled = true;
   chatInput.value = "";
   approvalBanner.style.display = "none";
+  // 新对话轮次：重置压缩标记，本轮结束后可再次触发
+  _compressFiredForTurn = false;
 
   // 新消息时重新显示状态行
   const sl = document.getElementById("statusLine");
@@ -453,6 +455,8 @@ function handleSSEEvent(data) {
       const sl = document.getElementById("statusLine");
       if (sl) { sl.style.display = "none"; }
       loadSessionList();
+      // 后台压缩：500ms 后静默触发（不阻塞 UI）
+      scheduleBackgroundCompress();
       break;
     case "error":
       if (currentAssistantBubble) {
@@ -462,6 +466,43 @@ function handleSSEEvent(data) {
       break;
   }
 }
+
+// ── 后台记忆压缩（不阻塞 UI）────────────────────────────────────────────────
+let _compressTimer = null;
+let _compressFiredForTurn = false;
+
+function scheduleBackgroundCompress(delayMs) {
+  // 每轮对话只触发一次压缩
+  if (_compressFiredForTurn) return;
+
+  if (_compressTimer) clearTimeout(_compressTimer);
+  _compressTimer = setTimeout(function () {
+    triggerBackgroundCompress();
+  }, delayMs || 500);
+}
+
+async function triggerBackgroundCompress() {
+  if (_compressFiredForTurn) return;
+  _compressFiredForTurn = true;
+
+  const sessionId = getCurrentSessionId();
+  const phone = sessionStorage.getItem(PHONE_STORAGE_KEY) || "";
+
+  try {
+    await fetch("/api/chat/" + encodeURIComponent(sessionId) + "/compress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: phone }),
+    });
+  } catch (e) {
+    // 后台静默失败，不影响用户体验
+  }
+}
+
+// 输入框聚焦时触发压缩（用户准备打下一条消息）
+chatInput.addEventListener("focus", function () {
+  scheduleBackgroundCompress(200);
+});
 
 // ── 人工审核 ────────────────────────────────────────────────────────────────
 async function handleApproval(approved) {
