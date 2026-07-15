@@ -52,40 +52,82 @@ def _safe_print(*args, **kwargs):
         print(*safe_args, **kwargs)
 
 
-# ── 意图分类节点 ────────────────────────────────────────────────────────────────
+# ── 正则规则预路由 ──────────────────────────────────────────────────────────────
+# 80% 高频问题直接命中，跳过 LLM 意图分类，省 token + 秒级响应
+import re
+
+ROUTE_RULES = [
+    # order: 订单、物流、快递
+    ("order", re.compile(
+        r"订单|物流|快递|发货|运单|到哪|送到了|没收到|还没到|查一下.*单|我的.*单|买了.*东西|下单"
+    )),
+    # aftersale: 退货、换货、退款、售后、投诉
+    ("aftersale", re.compile(
+        r"退货|换货|退款|售后|退钱|退.*款|换.*码|换.*大|换.*小|质量.*问题|坏.*了|有.*问题|投诉|差评|不.*满意"
+    )),
+    # product: 搜索、推荐、价格、有没有卖
+    ("product", re.compile(
+        r"推荐|有没有|多少钱|价格|怎么.*卖|有卖|买.*什么|选.*哪|对比|哪个.*好|介绍.*一下|怎么选|适合.*吗|值得.*买"
+    )),
+    # human: 转人工
+    ("human", re.compile(r"转人工|人工客服|找.*人|投诉.*电话")),
+]
+
+
+def _pre_route(user_msg: str) -> str | None:
+    """正则盲筛，返回匹配的 intent 或 None"""
+    if not user_msg:
+        return None
+    msg = user_msg.strip()
+    for intent, pattern in ROUTE_RULES:
+        if pattern.search(msg):
+            _safe_print(f"[PreRouter] regex match -> {intent}")
+            return intent
+    return None
+
+
+# ── 预路由节点 ──────────────────────────────────────────────────────────────────
+def pre_router_node(state: CSRState) -> dict:
+    """关键词盲筛：命中直接返回意图，未命中交给 LLM"""
+    user_msg = state["messages"][-1].content if state["messages"] else ""
+    intent = _pre_route(str(user_msg))
+    if intent:
+        return {
+            "intent": intent,
+            "iteration_count": 0,
+            "next_agent": intent,
+        }
+    # 未命中，标记需要 LLM
+    return {"intent": "__llm__"}
+
+
+def route_after_pre(state: CSRState) -> str:
+    """预路由后的分岔：命中→supervisor，未命中→LLM分类器"""
+    if state.get("intent") == "__llm__":
+        return "intent_classifier"
+    return "supervisor"
+
+
+# ── 意图分类节点（LLM）──────────────────────────────────────────────────────────
 def intent_classifier_node(state: CSRState) -> dict:
-    """
-    分析用户的首条消息，识别意图：
-      order   — 订单查询、物流跟踪
-      product — 商品搜索、商品咨询、选购推荐
-      aftersale — 退换货、退款、售后
-      faq     — 常见问题（配送、支付、会员等）
-      human   — 需要人工客服（投诉、复杂问题）
-    """
+    """预路由未命中时才走这里，用 LLM 分析用户消息"""
     user_msg = state["messages"][-1].content if state["messages"] else ""
 
-    prompt = f"""你是一个电商客服的意图分类器。分析用户消息，输出意图标签。
+    prompt = f"""分析用户消息，输出意图标签。
 
-意图标签定义：
-- order: 查询订单状态、物流、订单列表、订单详情
-- product: 搜索商品、商品推荐、询问价格、库存、规格、选购建议、使用指南
-- aftersale: 退换货、退款、投诉商品质量、售后申请
-- faq: 常见问题，如配送时间、支付方式、会员权益、退货政策等
-- human: 需要转人工的情况（严重投诉、无法判断意图、用户明确要求人工）
+标签：order(订单/物流) product(商品/推荐) aftersale(退货/退款/投诉) faq(政策/支付/会员/配送时效等通用问题) human(转人工)
 
 用户消息：{user_msg}
 
-请只输出一个意图标签（小写英文），不要其他内容。"""
+只输出一个标签（小写英文）："""
 
     response = llm.invoke([HumanMessage(content=prompt)])
     intent = response.content.strip().lower()
 
-    # 归一化
     if intent not in AGENT_NAMES + ["human"]:
-        intent = "faq"  # 默认走FAQ
+        intent = "faq"
 
-    _safe_print(f"\n[Intent Classifier] -> {intent}")
-
+    _safe_print(f"[Intent Classifier] LLM -> {intent}")
     return {"intent": intent, "iteration_count": 0, "next_agent": intent}
 
 
@@ -250,6 +292,7 @@ def build_csr_graph(checkpointer=None):
     builder = StateGraph(CSRState)
 
     # 添加节点
+    builder.add_node("pre_router", pre_router_node)
     builder.add_node("intent_classifier", intent_classifier_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("order_agent", call_order_agent)
@@ -259,8 +302,12 @@ def build_csr_graph(checkpointer=None):
     builder.add_node("human_approval", human_approval_node)
     builder.add_node("human_handoff", human_handoff_node)
 
-    # 连接边
-    builder.add_edge(START, "intent_classifier")
+    # 连接边：START → pre_router → [命中→supervisor | 未命中→LLM分类器→supervisor]
+    builder.add_edge(START, "pre_router")
+    builder.add_conditional_edges("pre_router", route_after_pre, {
+        "supervisor": "supervisor",
+        "intent_classifier": "intent_classifier",
+    })
     builder.add_edge("intent_classifier", "supervisor")
 
     # Supervisor 路由
