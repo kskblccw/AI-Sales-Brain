@@ -80,17 +80,16 @@ async function doLogin() {
     }
     const data = await resp.json();
     showLoggedIn(data.user_name, data.phone);
+    await loadSessionList();  // 刷新侧边栏会话
   } catch (e) {
     alert("登录失败: " + e.message);
   }
 }
 
 async function doLogout() {
-  // 清除当前 session 登录态（新 session）
-  const newId = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-  sessionStorage.setItem("cs_current_session", newId);
   showLoggedOut();
   newSession();
+  await loadSessionList();
 }
 
 async function checkLoginStatus() {
@@ -150,7 +149,9 @@ document.addEventListener("DOMContentLoaded", function() {
 // ── 会话列表（从服务器加载，合并本地缓存）─────────────────────────────────
 async function loadSessionList() {
   try {
-    const resp = await fetch("/api/sessions");
+    // 只加载当前登录用户的会话
+    const phone = sessionStorage.getItem(PHONE_STORAGE_KEY) || "";
+    const resp = await fetch(`/api/sessions?phone=${encodeURIComponent(phone)}`);
     if (!resp.ok) throw new Error("API error");
     const serverIds = await resp.json();  // 纯字符串数组 ["sess_xxx", ...]
     const currentId = getCurrentSessionId();
@@ -330,12 +331,18 @@ function addMessage(role, content) {
 }
 
 function addStatusMessage(label) {
-  const div = document.createElement("div");
-  div.className = "message status";
-  div.innerHTML = `<div class="message-bubble">${label}</div>`;
-  chatMessages.appendChild(div);
+  // 复用同一行，替换而非追加，避免占太多空间
+  let el = document.getElementById("statusLine");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "statusLine";
+    el.className = "message status";
+    el.innerHTML = '<div class="message-bubble"></div>';
+    chatMessages.appendChild(el);
+  }
+  el.querySelector(".message-bubble").textContent = label;
   scrollToBottom();
-  return div;
+  return el;
 }
 
 function createAssistantBubble() {
@@ -379,6 +386,10 @@ async function sendMessage() {
   btnSend.disabled = true;
   chatInput.value = "";
   approvalBanner.style.display = "none";
+
+  // 新消息时重新显示状态行
+  const sl = document.getElementById("statusLine");
+  if (sl) { sl.style.display = ""; sl.querySelector(".message-bubble").textContent = ""; }
 
   addMessage("user", message);
 
@@ -446,6 +457,8 @@ function handleSSEEvent(data) {
       break;
     case "done":
       currentAssistantBubble = null;
+      const sl = document.getElementById("statusLine");
+      if (sl) { sl.style.display = "none"; }
       loadSessionList();
       break;
     case "error":

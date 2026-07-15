@@ -44,15 +44,23 @@ async def index():
 
 # ── 全局图实例（启动时用同步 PostgresSaver 初始化）─────────────────────────
 _csr_graph = None
-# session_id -> phone 映射（存服务端内存，不写入 State 防止泄漏到 LLM）
+# session_id → phone（服务端内存，不写 State）
 _session_phones: dict[str, str] = {}
+# phone → {session_ids}（反向索引，用于按用户过滤会话列表）
+_phone_sessions: dict[str, set[str]] = {}
+
+
+def _bind_phone(session_id: str, phone: str):
+    """绑定 session 到 phone，建立双向映射"""
+    _session_phones[session_id] = phone
+    _phone_sessions.setdefault(phone, set()).add(session_id)
 
 
 def _get_config(session_id: str, phone_hint: str = "") -> dict:
     phone = _session_phones.get(session_id, "")
     # 兜底：前端把手机号存在 sessionStorage，请求时带上
     if not phone and phone_hint and len(phone_hint) == 11 and phone_hint.isdigit():
-        _session_phones[session_id] = phone_hint
+        _bind_phone(session_id, phone_hint)
         phone = phone_hint
     return {"configurable": {"thread_id": session_id, "user_phone": phone}}
 
@@ -81,7 +89,7 @@ async def login(session_id: str, request: Request):
     if not user:
         raise HTTPException(status_code=404, detail=f"未找到手机号 {phone} 对应的用户")
 
-    _session_phones[session_id] = phone
+    _bind_phone(session_id, phone)
     return JSONResponse({
         "logged_in": True,
         "phone": phone,
@@ -285,13 +293,23 @@ async def delete_session(session_id: str):
         conn.execute("DELETE FROM checkpoints WHERE thread_id = %s", (session_id,))
     return JSONResponse({"deleted": session_id})
 @app.get("/api/sessions")
-async def list_sessions():
-    """列出所有会话 ID（标题由前端 localStorage 维护）"""
+async def list_sessions(phone: str = ""):
+    """列出当前用户的会话 ID（按 phone 过滤，未登录返回空）"""
+    if not phone:
+        return JSONResponse([])
+
+    # 获取该 phone 关联的所有 session_id
+    user_sessions = _phone_sessions.get(phone, set())
+    if not user_sessions:
+        return JSONResponse([])
+
+    # 只返回在 checkpoints 表中确实存在的 session
     from config import get_checkpointer_pool
     pool = get_checkpointer_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints ORDER BY thread_id"
+            "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id = ANY(%s) ORDER BY thread_id",
+            (list(user_sessions),)
         ).fetchall()
     return JSONResponse([r[0] for r in rows])
 
