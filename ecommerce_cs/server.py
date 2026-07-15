@@ -70,6 +70,7 @@ def _make_initial_state(message: str, session_id: str) -> dict:
         "messages": [HumanMessage(content=message)],
         "intent": "", "iteration_count": 0, "next_agent": "",
         "user_phone": _session_phones.get(session_id, ""),
+        "summary": "", "user_profile_json": "",
     }
 
 
@@ -175,9 +176,14 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
 
         def run_graph():
             try:
-                for step in _csr_graph.stream(initial_state, config=config, stream_mode="updates"):
-                    q.put(("step", step))
-                # 完成后检查人工审核
+                # messages 逐 token + updates 节点状态 → 返回 (ns, mode, data) 三元组
+                for ns, mode, data in _csr_graph.stream(
+                    initial_state, config=config,
+                    stream_mode=["messages", "updates"],
+                    subgraphs=True,
+                ):
+                    q.put((mode, data))
+
                 state = _csr_graph.get_state(config)
                 pending = None
                 if state and state.tasks:
@@ -195,27 +201,39 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
         try:
             while True:
                 item = await asyncio.to_thread(q.get)
-                kind, data = item
+                mode, data = item
 
-                if kind == "step":
+                if mode == "messages":
+                    chunk, meta = data
+                    node_name = meta.get("langgraph_node", "")
+                    # 白名单：子 Agent 内部 LLM 节点名叫 "agent"，只放行它
+                    if node_name != "agent":
+                        continue
+                    if hasattr(chunk, "content") and chunk.content:
+                        text = str(chunk.content)
+                        # 过滤 [系统记忆] 和纯意图标签
+                        if text.startswith("[系统记忆]") or text.strip() in ("order", "product", "aftersale", "faq", "human", "FINISH"):
+                            continue
+                        yield {"event": "token", "data": json.dumps(
+                            {"type": "token", "content": text}, ensure_ascii=False)}
+
+                elif mode == "updates":
                     for node_name, node_output in data.items():
                         label = node_names.get(node_name, node_name)
+                        # 跳过 prepare_context 和 compress_memory 的状态展示
+                        if node_name in ("prepare_context", "compress_memory"):
+                            continue
                         yield {"event": "status", "data": json.dumps(
                             {"type": "status", "node": node_name, "label": label}, ensure_ascii=False)}
-                        if "messages" in node_output:
-                            last_msg = node_output["messages"][-1]
-                            if hasattr(last_msg, "content") and last_msg.content:
-                                yield {"event": "token", "data": json.dumps(
-                                    {"type": "token", "content": str(last_msg.content)}, ensure_ascii=False)}
 
-                elif kind == "done":
-                    if data:  # pending approval
+                elif mode == "done":
+                    if data:
                         yield {"event": "approval_required", "data": json.dumps(
                             {"type": "approval_required", "data": data}, ensure_ascii=False, default=str)}
                     yield {"event": "done", "data": json.dumps({"type": "done"})}
                     break
 
-                elif kind == "error":
+                elif mode == "error":
                     yield {"event": "error", "data": json.dumps(
                         {"type": "error", "message": data[:200]}, ensure_ascii=False)}
                     break
@@ -323,16 +341,17 @@ async def get_history(session_id: str):
     messages = []
     if state.values:
         for msg in state.values.get("messages", []):
-            msg_data = {"role": "unknown", "content": ""}
             msg_type = getattr(msg, "type", "")
-            if msg_type == "human":
-                msg_data["role"] = "user"
-            elif msg_type == "ai":
-                msg_data["role"] = "assistant"
-            elif msg_type == "system":
-                msg_data["role"] = "system"
-            msg_data["content"] = str(getattr(msg, "content", ""))
-            messages.append(msg_data)
+            content = str(getattr(msg, "content", ""))
+            # 过滤：系统记忆消息和空消息不在前端展示
+            if msg_type == "system" and "[系统记忆]" in content:
+                continue
+            if msg_type == "system" and not content.strip():
+                continue
+            if msg_type == "ai" and not content.strip():
+                continue
+            role = {"human": "user", "ai": "assistant", "system": "system"}.get(msg_type, "unknown")
+            messages.append({"role": role, "content": content})
 
     return JSONResponse({"session_id": session_id, "messages": messages})
 

@@ -2,8 +2,7 @@
 aftersale_agent.py — 售后专员子图
 
 职责：退换货政策咨询、售后申请创建、工单状态查询
-
-注意：create_return_request 工具执行前需要人工确认（在父图中通过 interrupt_before 实现）
+流程：先查订单列表 → 用户选单 → 确认详情 → 提交工单 → 人工审核
 """
 
 from typing import TypedDict, Annotated
@@ -16,8 +15,9 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from config import make_llm
 from tools.aftersale_tools import AFTERSALE_TOOLS
 from tools.auth_tools import AUTH_TOOLS
+from tools.order_tools import list_my_orders, query_order
 
-_AGENT_TOOLS = AFTERSALE_TOOLS + AUTH_TOOLS
+_AGENT_TOOLS = AFTERSALE_TOOLS + AUTH_TOOLS + [list_my_orders, query_order]
 
 
 class AfterSaleAgentState(TypedDict):
@@ -31,38 +31,37 @@ def build_aftersale_agent() -> StateGraph:
     tool_node = ToolNode(_AGENT_TOOLS)
 
     SYSTEM_PROMPT = """【角色】你是电商平台的售后专员，负责退换货、退款、售后政策咨询和工单处理。
+如果对话开头有"系统记忆"标记，请参考其中的用户画像和历史摘要，但不要复述。
 
 【工具清单】
-- check_return_policy()                    → 查询退换货/退款政策详情
-- create_return_request(订单号, 原因, 类型) → 创建售后工单（自动验证身份，需人工审核）
-- query_return_status(工单号)              → 查询售后工单进度（自动验证身份）
-- get_current_user_phone()                 → 确认用户登录状态
+- list_my_orders()                             → 查看用户全部订单（含订单号/状态/金额/商品）
+- query_order(订单号)                           → 查看某订单详情
+- check_return_policy()                        → 查询退换货/退款政策
+- create_return_request(订单号, 原因, 类型)     → 创建售后工单（自动验证身份，需人工审核）
+- query_return_status(工单号)                  → 查售后进度（自动验证身份）
+- get_current_user_phone()                     → 确认登录状态
 
-【行为准则】
-1. 用户咨询政策 → 直接调 check_return_policy，整理关键信息回复
-2. 用户要退货/换货/退款 → 确认订单号和原因后直接调 create_return_request
-   - 类型可选：退货 / 换货 / 退款，默认退货
-   - 原因示例：质量问题 / 不想要了 / 发错货 / 尺码不合适 / 与描述不符
-3. 用户查进度 → 直接调 query_return_status
-4. 创建工单成功后明确告知：审核需要1-2个工作日，结果短信通知
-5. 每次回复末尾必须加 [DONE]
+【售后标准流程——严格按顺序】
+1. 用户要退货/换货/退款 → 第一步：调 list_my_orders 列出该用户所有订单
+2. 展示订单列表（订单号、状态、金额、商品），让用户确认是哪个订单
+3. 用户确认后，调 create_return_request 提交工单
+4. 告知结果和审核时间
 
-【不同类型售后指引】
-- 质量问题：先致歉 → 询问订单号 → 创建退货/换货工单
-- 尺码不合适：告知可换货 → 确认订单号 → 创建换货工单
-- 单纯咨询政策：调 check_return_policy → 整理要点回复
-- 投诉类：致歉 → 记录问题 → 建议升级人工客服
+【其他场景】
+- 只咨询政策 → 调 check_return_policy 回复
+- 查售后进度 → 调 query_return_status
+- 投诉 → 致歉 + 建议转人工
 
 【边界规则】
-- 工具返回"未登录" → 告知用户去页面右上角输入手机号
-- 订单不属于当前用户 → 说明安全限制，建议核对信息
-- 订单状态不允许售后（待付款/已取消）→ 解释原因
-- 生鲜/定制/个人护理类商品 → 提醒不支持无理由退货
+- 工具返回"未登录" → 告知去右上角输入手机号
+- 订单不属于当前用户 → 说明安全限制
+- 已取消/待付款的订单不能售后 → 解释原因
+- list_my_orders 返回空 → 告知用户暂无订单
 
 【禁止行为】
-- 禁止在未经工具验证的情况下承诺退款金额或到账时间
-- 禁止建议用户绕过正常售后流程
-- 禁止对投诉类问题敷衍了事
+- 禁止不查订单直接要订单号
+- 禁止在未调工具前承诺退款金额/时间
+- 禁止建议绕过正常售后流程
 """
 
     def agent_node(state: AfterSaleAgentState, config: RunnableConfig) -> dict:

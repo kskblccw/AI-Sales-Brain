@@ -15,6 +15,10 @@ from langgraph.types import interrupt
 
 from langchain_core.runnables import RunnableConfig
 from config import make_llm
+from memory import (
+    build_context_injection, compress_history, extract_user_profile,
+    apply_sliding_window, _user_id_from_phone,
+)
 from agents.order_agent import build_order_agent
 from agents.product_agent import build_product_agent
 from agents.aftersale_agent import build_aftersale_agent
@@ -27,7 +31,9 @@ class CSRState(TypedDict):
     intent: str            # 用户意图：order/product/aftersale/faq/human
     iteration_count: int   # 子Agent调度轮数
     next_agent: str        # supervisor 决定的下一个Agent
-    user_phone: str        # 当前用户手机号（元数据，不注入 LLM 上下文）
+    user_phone: str        # 当前用户手机号（元数据）
+    summary: str           # 历史对话摘要（压缩后）
+    user_profile_json: str # 用户画像 JSON（压缩后）
 
 
 # 可用的子Agent列表
@@ -134,50 +140,93 @@ def intent_classifier_node(state: CSRState) -> dict:
 # ── Supervisor 决策节点 ─────────────────────────────────────────────────────────
 def supervisor_node(state: CSRState) -> dict:
     """
-    LLM Supervisor：动态决定下一步路由
-    - 根据意图和当前对话状态，决定调用哪个子Agent或结束
+    Supervisor：第1轮用 LLM 路由，第2轮起自动 FINISH
+    不再依赖 LLM 输出的 [DONE] 文本标记（防注入），改用系统级状态判断
     """
-    iteration = state.get("iteration_count", 0) + 1  # 每次调度递增
+    iteration = state.get("iteration_count", 0) + 1
     intent = state.get("intent", "")
 
-    # 获取最近的对话摘要
-    recent_msgs = state["messages"][-4:] if len(state["messages"]) > 4 else state["messages"]
-    context = "\n".join(
-        f"[{m.__class__.__name__}] {m.content[:200]}" for m in recent_msgs
-    )
+    # 安全检查：超过上限强制结束
+    if iteration > 3:
+        _safe_print(f"[Supervisor] 第{iteration}轮 -> FINISH (安全上限)")
+        return {"next_agent": "FINISH", "iteration_count": iteration}
 
-    prompt = f"""你是一个电商客服的调度员。根据对话内容决定下一步行动。
+    # 第1轮：用 LLM 决定路由（基于意图 + 用户消息）
+    if iteration == 1:
+        recent_msgs = state["messages"][-3:] if len(state["messages"]) > 3 else state["messages"]
+        context = "\n".join(
+            f"[{m.__class__.__name__}] {str(m.content)[:200]}" for m in recent_msgs
+        )
 
-可用专家：order（订单）、product（商品）、aftersale（售后）、faq（常见问题）
-结束条件：用户问题已解决，或最后一条消息末尾有 [DONE] 标记
+        prompt = f"""根据用户消息决定路由。意图={intent}。
 
-当前意图：{intent}
-已调度轮数：{iteration}（最多5轮）
+可用：order(订单/物流) product(商品/推荐) aftersale(退货/退款) faq(配送/支付/会员等通用) FINISH(结束)
 
-最近对话：
+对话：
 {context}
 
-请仅输出以下之一：order / product / aftersale / faq / FINISH"""
+只输出一个标签（小写英文）："""
 
-    # 强制检查：最后一条 AI 消息有 [DONE] 或超过轮数上限 → 直接结束
-    last_content = state["messages"][-1].content if state["messages"] else ""
-    if "[DONE]" in str(last_content):
-        _safe_print(f"[Supervisor] 第{iteration}轮 -> FINISH (检测到[DONE])")
-        return {"next_agent": "FINISH", "iteration_count": iteration}
-    if iteration > 5:
-        _safe_print(f"[Supervisor] 第{iteration}轮 -> FINISH (超过轮数上限)")
-        return {"next_agent": "FINISH", "iteration_count": iteration}
+        response = llm.invoke([HumanMessage(content=prompt)])
+        decision = response.content.strip()
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    decision = response.content.strip()
+        if decision not in AGENT_NAMES + ["FINISH"]:
+            decision = intent if intent in AGENT_NAMES else "faq"
 
-    # 归一化：LLM 输出异常时回退到初始意图
-    if decision not in AGENT_NAMES + ["FINISH"]:
-        decision = intent if intent in AGENT_NAMES else "faq"
+        _safe_print(f"[Supervisor] 第1轮 → {decision}")
+        return {"next_agent": decision, "iteration_count": iteration}
 
-    _safe_print(f"[Supervisor] 第{iteration}轮 → {decision}")
+    # 第2轮+：子 Agent 已完成 ReAct 循环，自动结束
+    _safe_print(f"[Supervisor] 第{iteration}轮 -> FINISH (子Agent已完成)")
+    return {"next_agent": "FINISH", "iteration_count": iteration}
 
-    return {"next_agent": decision, "iteration_count": iteration}
+
+# ── 记忆系统节点 ────────────────────────────────────────────────────────────────
+def prepare_context_node(state: CSRState) -> dict:
+    """
+    每轮对话开始时：注入历史摘要 + 用户画像到对话开头
+    不重复注入（只在 state 中没有注入标记时执行）
+    """
+    phone = state.get("user_phone", "")
+    summary = state.get("summary", "")
+
+    if not phone:
+        return {}
+
+    user_id = _user_id_from_phone(phone)
+    injection = build_context_injection(user_id, summary)
+
+    if not injection:
+        return {}
+
+    # 检查是否已经注入过（避免重复）
+    msg = SystemMessage(content=f"[系统记忆]\n{injection}\n\n请根据以上用户画像和历史摘要提供个性化服务。")
+
+    return {"messages": [msg]}
+
+
+def compress_memory_node(state: CSRState) -> dict:
+    """
+    对话结束后：压缩历史 → 更新摘要，抽取用户画像
+    """
+    phone = state.get("user_phone", "")
+    if not phone:
+        return {}
+
+    user_id = _user_id_from_phone(phone)
+
+    # 滑动窗口：取最近 12 条消息用于压缩
+    all_msgs = state.get("messages", [])
+    window = apply_sliding_window(all_msgs, window_size=12)
+
+    old_summary = state.get("summary", "")
+    new_summary = compress_history(window, old_summary)
+
+    # 抽取用户画像
+    extract_user_profile(user_id, window)
+
+    _safe_print(f"[Memory] 摘要已更新 ({len(new_summary)}字)")
+    return {"summary": new_summary}
 
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
@@ -203,10 +252,10 @@ def call_aftersale_agent(state: CSRState, config: RunnableConfig) -> dict:
     last_msg = result["messages"][-1]
     _safe_print(f"[AfterSale Agent] 完成: {str(last_msg.content)[:80]}...")
 
-    # 检查是否需要人工审核（售后申请创建）
+    # 检查是否创建了售后工单（包含申请编号 = 需人工审核）
     content = str(last_msg.content) if last_msg.content else ""
-    if "需要人工审核" in content or "待审核" in content:
-        _safe_print("[AfterSale Agent] 检测到待审核操作，触发人工确认流程")
+    if "申请编号" in content:
+        _safe_print("[AfterSale Agent] 售后工单已创建，触发人工审核流程")
         return {
             "messages": [last_msg],
             "next_agent": "human_approval",
@@ -293,6 +342,7 @@ def build_csr_graph(checkpointer=None):
 
     # 添加节点
     builder.add_node("pre_router", pre_router_node)
+    builder.add_node("prepare_context", prepare_context_node)
     builder.add_node("intent_classifier", intent_classifier_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("order_agent", call_order_agent)
@@ -301,10 +351,12 @@ def build_csr_graph(checkpointer=None):
     builder.add_node("faq_agent", call_faq_agent)
     builder.add_node("human_approval", human_approval_node)
     builder.add_node("human_handoff", human_handoff_node)
+    builder.add_node("compress_memory", compress_memory_node)
 
-    # 连接边：START → pre_router → [命中→supervisor | 未命中→LLM分类器→supervisor]
+    # 连接边：START → pre_router → prepare_context → [命中→supervisor | 未命中→LLM→supervisor]
     builder.add_edge(START, "pre_router")
-    builder.add_conditional_edges("pre_router", route_after_pre, {
+    builder.add_edge("pre_router", "prepare_context")
+    builder.add_conditional_edges("prepare_context", route_after_pre, {
         "supervisor": "supervisor",
         "intent_classifier": "intent_classifier",
     })
@@ -321,9 +373,12 @@ def build_csr_graph(checkpointer=None):
             "faq": "faq_agent",
             "human": "human_handoff",
             "human_approval": "human_approval",
-            "FINISH": END,
+            "FINISH": "compress_memory",
         },
     )
+
+    # compress_memory → END
+    builder.add_edge("compress_memory", END)
 
     # 子Agent执行后回 Supervisor（或去人工审核）
     builder.add_conditional_edges(
@@ -347,9 +402,9 @@ def build_csr_graph(checkpointer=None):
         {"supervisor": "supervisor", "human_approval": "human_approval"},
     )
 
-    # 人工节点 → 结束
-    builder.add_edge("human_approval", END)
-    builder.add_edge("human_handoff", END)
+    # 人工节点 → 压缩记忆 → 结束
+    builder.add_edge("human_approval", "compress_memory")
+    builder.add_edge("human_handoff", "compress_memory")
 
     # 编译
     # - checkpointer=None（云部署）：LangGraph Cloud 自动注入 PostgresSaver
@@ -368,7 +423,7 @@ def chat(question: str, session_id: str = "default", checkpointer=None) -> str:
         {
             "messages": [HumanMessage(content=question)],
             "intent": "", "iteration_count": 0, "next_agent": "",
-            "user_phone": "",
+            "user_phone": "", "summary": "", "user_profile_json": "",
         },
         config=config,
     )
