@@ -185,8 +185,8 @@ def supervisor_node(state: CSRState) -> dict:
 # ── 记忆系统节点 ────────────────────────────────────────────────────────────────
 def prepare_context_node(state: CSRState) -> dict:
     """
-    每轮对话开始时：从 DB 注入历史摘要 + 用户画像到对话开头
-    摘要由后台异步压缩写入 DB，此处只读取。
+    每轮对话开始时：从 DB 注入当前用户的历史摘要 + 用户画像。
+    同时清除旧的 [系统记忆] 消息，确保不同用户的记忆不会混合。
     """
     phone = state.get("user_phone", "")
 
@@ -194,15 +194,25 @@ def prepare_context_node(state: CSRState) -> dict:
         return {}
 
     user_id = _user_id_from_phone(phone)
-    # 不传 summary 参数 → build_context_injection 从 DB 读取（后台压缩已存入）
     injection = build_context_injection(user_id)
 
+    # 移除所有旧的 [系统记忆] 消息（可能是其他用户或旧轮次残留）
+    from langchain_core.messages import RemoveMessage
+    old_memory_ids = [
+        m.id for m in state.get("messages", [])
+        if isinstance(m, SystemMessage) and m.content and "[系统记忆]" in str(m.content)
+    ]
+
     if not injection:
-        return {}
+        # 没有可注入的记忆，只清除旧记忆
+        return {"messages": [RemoveMessage(id=mid) for mid in old_memory_ids]} if old_memory_ids else {}
 
     msg = SystemMessage(content=f"[系统记忆]\n{injection}\n\n请根据以上用户画像和历史摘要提供个性化服务。")
+    result = {"messages": [msg]}
+    if old_memory_ids:
+        result["messages"] = [RemoveMessage(id=mid) for mid in old_memory_ids] + result["messages"]
 
-    return {"messages": [msg]}
+    return result
 
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────

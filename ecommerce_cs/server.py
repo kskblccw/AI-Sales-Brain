@@ -44,24 +44,56 @@ async def index():
 
 # ── 全局图实例（启动时用同步 PostgresSaver 初始化）─────────────────────────
 _csr_graph = None
-# session_id → phone（服务端内存，不写 State）
-_session_phones: dict[str, str] = {}
-# phone → {session_ids}（反向索引，用于按用户过滤会话列表）
-_phone_sessions: dict[str, set[str]] = {}
+
+
+# ── Session ↔ Phone 持久化（PostgreSQL，服务器重启不丢失）───────────────────
+def _ensure_session_table():
+    from config import get_checkpointer_pool
+    pool = get_checkpointer_pool()
+    with pool.connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_phones (
+                session_id VARCHAR(64) PRIMARY KEY,
+                phone VARCHAR(20) NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+
+_ensure_session_table()
 
 
 def _bind_phone(session_id: str, phone: str):
-    """绑定 session 到 phone，建立双向映射"""
-    _session_phones[session_id] = phone
-    _phone_sessions.setdefault(phone, set()).add(session_id)
+    """绑定 session 到 phone，同时写入 PostgreSQL"""
+    from config import get_checkpointer_pool
+    pool = get_checkpointer_pool()
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO session_phones (session_id, phone) VALUES (%s, %s) "
+            "ON CONFLICT (session_id) DO UPDATE SET phone = EXCLUDED.phone, created_at = NOW()",
+            (session_id, phone),
+        )
+
+
+def _get_phone_from_db(session_id: str) -> str:
+    """从 DB 读取 session 绑定的手机号"""
+    from config import get_checkpointer_pool
+    pool = get_checkpointer_pool()
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT phone FROM session_phones WHERE session_id = %s", (session_id,)
+        ).fetchone()
+    return row[0] if row else ""
 
 
 def _get_config(session_id: str, phone_hint: str = "") -> dict:
-    phone = _session_phones.get(session_id, "")
-    # 兜底：前端把手机号存在 sessionStorage，请求时带上
+    phone = _get_phone_from_db(session_id)
+
+    # 兜底：前端带了 phone 参数，自动绑定
     if not phone and phone_hint and len(phone_hint) == 11 and phone_hint.isdigit():
         _bind_phone(session_id, phone_hint)
         phone = phone_hint
+
     return {"configurable": {"thread_id": session_id, "user_phone": phone}}
 
 
@@ -69,7 +101,7 @@ def _make_initial_state(message: str, session_id: str) -> dict:
     return {
         "messages": [HumanMessage(content=message)],
         "intent": "", "iteration_count": 0, "next_agent": "",
-        "user_phone": _session_phones.get(session_id, ""),
+        "user_phone": _get_phone_from_db(session_id),
         "summary": "", "user_profile_json": "",
         "approval_decision": "", "approval_meta": "",
     }
@@ -102,7 +134,7 @@ async def login(session_id: str, request: Request):
 @app.get("/api/login/{session_id}")
 async def get_login_status(session_id: str):
     """查询当前 session 的登录状态"""
-    phone = _session_phones.get(session_id, "")
+    phone = _get_phone_from_db(session_id)
     if not phone:
         return JSONResponse({"logged_in": False, "phone": "", "user_name": ""})
     from database import find_user_by_phone
@@ -126,7 +158,7 @@ async def chat_non_stream(session_id: str, request: Request):
     phone_hint = body.get("phone", "")
     config = _get_config(session_id, phone_hint=phone_hint)
     initial_state = _make_initial_state(question, session_id)
-    # 兜底：如果 phone 参数带了但 _session_phones 是新的
+    # 兜底：如果 phone 参数带了但 DB 还没绑定
     if phone_hint and not initial_state.get("user_phone"):
         initial_state["user_phone"] = phone_hint
 
@@ -333,18 +365,16 @@ async def list_sessions(phone: str = ""):
     if not phone:
         return JSONResponse([])
 
-    # 获取该 phone 关联的所有 session_id
-    user_sessions = _phone_sessions.get(phone, set())
-    if not user_sessions:
-        return JSONResponse([])
-
-    # 只返回在 checkpoints 表中确实存在的 session
+    # 从 DB 查询该 phone 关联的所有 session_id
     from config import get_checkpointer_pool
     pool = get_checkpointer_pool()
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id = ANY(%s) ORDER BY thread_id",
-            (list(user_sessions),)
+            "SELECT sp.session_id FROM session_phones sp "
+            "INNER JOIN checkpoints c ON c.thread_id = sp.session_id "
+            "WHERE sp.phone = %s "
+            "GROUP BY sp.session_id ORDER BY MAX(c.checkpoint_id) DESC",
+            (phone,)
         ).fetchall()
     return JSONResponse([r[0] for r in rows])
 
@@ -386,7 +416,7 @@ async def compress_session(session_id: str, request: Request):
     下次对话时 prepare_context_node 直接从 DB 读取。
     """
     body = await request.json()
-    phone = body.get("phone", "").strip() or _session_phones.get(session_id, "")
+    phone = body.get("phone", "").strip() or _get_phone_from_db(session_id)
 
     if not phone:
         return JSONResponse({"compressed": False, "reason": "not logged in"})
