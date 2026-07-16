@@ -33,9 +33,9 @@
 
 ![客服对话界面](pictures/Snipaste_2026-07-16_13-27-49.png)
 
-**知识库管理 - 文档列表**
+**LangSmith 评估**
 
-![客服对话界面](pictures/Snipaste_2026-07-16_13-28-34.png)
+![测评结果](pictures/Snipaste_2026-07-16_14-24-05.png)
 
 **知识库管理 - 文档编辑**
 

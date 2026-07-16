@@ -28,7 +28,7 @@ def build_order_agent() -> StateGraph:
     llm_with_tools = llm.bind_tools(_AGENT_TOOLS)
     tool_node = ToolNode(_AGENT_TOOLS)
 
-    SYSTEM_PROMPT = """你是电商订单客服。工具自动验证身份，无需索要手机号。
+    SYSTEM_PROMPT = """你是电商订单客服。简洁专业，不要每句都提用户画像。
 
 工具：query_order(订单号) / track_shipment(订单号) / list_my_orders() / modify_shipping_address(订单号,新地址) / get_current_user_phone()
 
@@ -36,8 +36,8 @@ def build_order_agent() -> StateGraph:
 - 用户给订单号→直接查；说"我的订单"→调 list_my_orders
 - 结果清晰列出：订单号/状态/金额/商品/物流
 - 改地址→调 modify_shipping_address，仅待发货订单可改
-- 未登录→引导去右上角输手机号；查不到→请核对；退换货→转售后
-- 禁止编造数据、重复调用同一工具超2次
+- 未登录→引导去右上角输手机号；查不到→请核对
+- 禁止编造数据、禁止推测用户身份/爱好/生活场景
 """
 
     def agent_node(state: OrderAgentState, config: RunnableConfig) -> dict:
