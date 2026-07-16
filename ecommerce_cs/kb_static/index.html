@@ -27,9 +27,10 @@ tr:hover { background:#f9f9f9; }
 .content-preview { max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .meta-tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#e8f0fe; color:var(--primary); margin:1px 2px; }
 .meta-tag.custom { background:#fff3e0; color:#e67e00; }
-.pagination { display:flex; justify-content:center; gap:8px; margin-top:16px; }
-.pagination button { padding:6px 12px; border:1px solid var(--border); border-radius:4px; background:var(--card); cursor:pointer; font-size:13px; }
+.pagination { display:flex; justify-content:center; gap:6px; margin-top:16px; flex-wrap:wrap; max-width:100%; overflow:hidden; }
+.pagination button { padding:6px 10px; border:1px solid var(--border); border-radius:4px; background:var(--card); cursor:pointer; font-size:13px; min-width:32px; }
 .pagination button.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+.pagination button.dot { border:none; background:transparent; cursor:default; }
 .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.3); z-index:100; justify-content:center; align-items:center; }
 .modal.show { display:flex; }
 .modal-box { background:var(--card); border-radius:12px; padding:24px; width:600px; max-height:80vh; overflow-y:auto; }
@@ -143,11 +144,25 @@ async function loadDocs(page=1) {
       </tr>`).join('');
   }
 
-  // 分页
+  // 分页（仅显示当前页附近 + 首尾，防止溢出）
   const pg = document.getElementById('pagination');
   let html = '';
-  for(let i=1; i<=totalPages; i++) {
-    html += `<button class="${i===page?'active':''}" onclick="loadDocs(${i})">${i}</button>`;
+  const maxShow = 7; // 最多显示7个页码按钮
+  if (totalPages <= maxShow + 2) {
+    for (let i = 1; i <= totalPages; i++) {
+      html += `<button class="${i===page?'active':''}" onclick="loadDocs(${i})">${i}</button>`;
+    }
+  } else {
+    html += `<button class="${1===page?'active':''}" onclick="loadDocs(1)">1</button>`;
+    let start = Math.max(2, page - Math.floor(maxShow / 2));
+    let end = Math.min(totalPages - 1, start + maxShow - 1);
+    if (end - start < maxShow - 1) start = Math.max(2, end - maxShow + 1);
+    if (start > 2) html += '<button class="dot">...</button>';
+    for (let i = start; i <= end; i++) {
+      html += `<button class="${i===page?'active':''}" onclick="loadDocs(${i})">${i}</button>`;
+    }
+    if (end < totalPages - 1) html += '<button class="dot">...</button>';
+    html += `<button class="${totalPages===page?'active':''}" onclick="loadDocs(${totalPages})">${totalPages}</button>`;
   }
   pg.innerHTML = html;
 

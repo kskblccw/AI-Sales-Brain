@@ -10,30 +10,56 @@ import sys
 import subprocess
 import threading
 import time
+import os
+from pathlib import Path
 
 PYTHON = r"D:\pycharm\condavenv\learn_langchain\python.exe"
+ROOT = Path(__file__).parent  # ecommerce_cs 目录
 
 
 def run_server(script: str, port: int, name: str):
     """在子进程中启动服务"""
+    script_path = ROOT / script
+    if not script_path.exists():
+        print(f"[{name}] 脚本不存在: {script_path}")
+        return None
+
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+
     proc = subprocess.Popen(
-        [PYTHON, script],
+        [PYTHON, str(script_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         encoding="utf-8",
         errors="replace",
+        cwd=str(ROOT),
+        env=env,
     )
     print(f"[{name}] 端口 {port} 已启动 (PID={proc.pid})")
 
     # 流式输出日志
     def _stream():
-        for line in proc.stdout:
-            if line.strip():
-                print(f"[{name}] {line.rstrip()}")
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    print(f"[{name}] {line}")
+        except Exception:
+            pass
 
     t = threading.Thread(target=_stream, daemon=True)
     t.start()
+
+    # 等 2 秒看进程是否立即退出（启动失败）
+    time.sleep(2)
+    ret = proc.poll()
+    if ret is not None:
+        print(f"[{name}] 启动失败，退出码 {ret}。请检查端口 {port} 是否被占用或依赖是否就绪。")
+        return None
+
     return proc
 
 
@@ -44,12 +70,18 @@ def main():
     procs = []
 
     if not kb_only:
-        procs.append(run_server("server.py", 8000, "客服系统"))
-        time.sleep(1)
+        p = run_server("server.py", 8000, "客服系统")
+        if p:
+            procs.append(p)
 
     if not chat_only:
-        procs.append(run_server("kb_server.py", 8001, "知识库"))
-        time.sleep(1)
+        p = run_server("kb_server.py", 8001, "知识库")
+        if p:
+            procs.append(p)
+
+    if not procs:
+        print("\n没有成功启动的服务，退出。")
+        return
 
     print("\n" + "=" * 60)
     if not kb_only:
@@ -60,12 +92,25 @@ def main():
     print("=" * 60 + "\n")
 
     try:
-        for p in procs:
-            p.wait()
+        while True:
+            # 持续检查进程状态
+            for p in procs:
+                ret = p.poll()
+                if ret is not None:
+                    print(f"[警告] 进程 PID={p.pid} 意外退出，退出码 {ret}")
+                    procs.remove(p)
+            if not procs:
+                print("所有服务已退出。")
+                break
+            time.sleep(2)
     except KeyboardInterrupt:
         print("\n正在停止...")
         for p in procs:
             p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
         print("已停止。")
 
 

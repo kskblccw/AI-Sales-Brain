@@ -118,15 +118,20 @@ class DashScopeEmbeddings(Embeddings):
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        # 批量请求：一次 HTTP 调用处理全部文本
-        resp = self.client.post(
-            self._url,
-            json={"model": self.model, "input": {"texts": texts}},
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return [e["embedding"] for e in data["output"]["embeddings"]]
+        # 分批请求：每次最多 10 条，避免单次请求过大
+        embeddings = []
+        batch_size = 10
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            resp = self.client.post(
+                self._url,
+                json={"model": self.model, "input": {"texts": batch}},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embeddings.extend(e["embedding"] for e in data["output"]["embeddings"])
+        return embeddings
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed_documents([text])[0]

@@ -25,9 +25,41 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _csr_graph
-    from config import get_checkpointer
+    from config import get_checkpointer, get_checkpointer_pool
     _csr_graph = build_csr_graph(checkpointer=get_checkpointer())
     print("[Startup] PostgresSaver ready")
+
+    # 清理 30 天前的过期 checkpoint（无 phone 绑定的孤立会话）
+    try:
+        pool = get_checkpointer_pool()
+        with pool.connection() as conn:
+            conn.execute("""
+                DELETE FROM checkpoint_blobs WHERE thread_id IN (
+                    SELECT c.thread_id FROM checkpoints c
+                    LEFT JOIN session_phones sp ON sp.session_id = c.thread_id
+                    WHERE sp.session_id IS NULL
+                )
+            """)
+            conn.execute("""
+                DELETE FROM checkpoint_writes WHERE thread_id IN (
+                    SELECT c.thread_id FROM checkpoints c
+                    LEFT JOIN session_phones sp ON sp.session_id = c.thread_id
+                    WHERE sp.session_id IS NULL
+                )
+            """)
+            result = conn.execute("""
+                DELETE FROM checkpoints WHERE thread_id IN (
+                    SELECT c.thread_id FROM checkpoints c
+                    LEFT JOIN session_phones sp ON sp.session_id = c.thread_id
+                    WHERE sp.session_id IS NULL
+                )
+            """)
+            # 同时清理 30 天未活动的用户画像
+            conn.execute("DELETE FROM user_profiles WHERE last_active_time < NOW() - INTERVAL '30 days'")
+        print(f"[Startup] 已清理 {result.rowcount} 个过期 session")
+    except Exception as e:
+        print(f"[Startup] 清理过期数据跳过: {e}")
+
     yield
 
 app = FastAPI(title="电商智能客服系统", version="1.0", lifespan=lifespan)
@@ -254,6 +286,11 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
                         chunk, meta = data
                         node_name = meta.get("langgraph_node", "")
                         if node_name != "agent":
+                            continue
+                        # 过滤 tool_call 产生的文本片段（如参数 JSON 碎片）
+                        if hasattr(chunk, "tool_calls") and chunk.tool_calls:
+                            continue
+                        if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
                             continue
                         if hasattr(chunk, "content") and chunk.content:
                             text = str(chunk.content)

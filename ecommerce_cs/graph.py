@@ -50,13 +50,22 @@ _subgraphs = {
 
 llm = make_llm(temperature=0.3)
 
-# ── 安全打印（Windows console GBK 兼容）───────────────────────────────────────
+# ── 安全打印（Windows console 兼容）───────────────────────────────────────────
 def _safe_print(*args, **kwargs):
     try:
-        print(*args, **kwargs)
+        print(*args, **kwargs, flush=True)
     except UnicodeEncodeError:
-        safe_args = [a.encode("ascii", "replace").decode("ascii") if isinstance(a, str) else a for a in args]
-        print(*safe_args, **kwargs)
+        try:
+            # 尝试用 UTF-8 绕过 console 编码限制
+            import sys
+            for a in args:
+                if isinstance(a, str):
+                    sys.stdout.buffer.write(a.encode("utf-8") + b"\n")
+                else:
+                    print(a, flush=True)
+        except Exception:
+            safe_args = [a.encode("ascii", "replace").decode("ascii") if isinstance(a, str) else a for a in args]
+            print(*safe_args, flush=True)
 
 
 # ── 正则规则预路由 ──────────────────────────────────────────────────────────────
@@ -217,16 +226,20 @@ def prepare_context_node(state: CSRState) -> dict:
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
 def _invoke_subgraph(name: str, state: CSRState, config: RunnableConfig) -> dict:
-    """通用子图调用：执行 → 取最后消息 → 返回结果"""
+    """通用子图调用：执行 → 取最后消息 → 返回结果，异常兜底"""
     _safe_print(f"[{name}] 开始处理...")
-    result = _subgraphs[name].invoke({"messages": state["messages"]}, config)
-    msgs = result.get("messages", [])
-    if not msgs:
-        _safe_print(f"[{name}] 子图返回空消息，使用兜底回复")
-        return {"messages": [AIMessage(content=f"{name}专员暂时无法处理您的请求，请稍后重试或联系人工客服。")]}
-    last_msg = msgs[-1]
-    _safe_print(f"[{name}] 完成: {str(last_msg.content)[:80]}...")
-    return {"messages": [last_msg]}
+    try:
+        result = _subgraphs[name].invoke({"messages": state["messages"]}, config)
+        msgs = result.get("messages", [])
+        if not msgs:
+            _safe_print(f"[{name}] 子图返回空消息，使用兜底回复")
+            return {"messages": [AIMessage(content=f"{name}专员暂时无法处理您的请求，请稍后重试或联系人工客服。")]}
+        last_msg = msgs[-1]
+        _safe_print(f"[{name}] 完成: {str(last_msg.content)[:80]}...")
+        return {"messages": [last_msg]}
+    except Exception as e:
+        _safe_print(f"[{name}] 异常: {e}")
+        return {"messages": [AIMessage(content="抱歉，系统处理您的请求时遇到问题，请稍后重试。如需紧急帮助请拨打 400-888-8888。")]}
 
 
 def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:

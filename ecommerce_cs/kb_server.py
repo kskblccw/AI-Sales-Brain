@@ -133,27 +133,46 @@ async def get_document(doc_id: str):
 
 @app.post("/api/documents")
 async def create_document(doc: DocCreate):
-    """新增知识库文档（自动生成 embedding）"""
-    # 用 langchain 的 embedding 生成向量
-    emb = make_embeddings()
-    vector = emb.embed_query(doc.content[:1000])  # 用前 1000 字做向量
+    """新增知识库文档（长文档自动切分，每个 chunk 独立嵌入）"""
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    doc_id = str(uuid.uuid4())
-    coll = _get_collection()
-    coll.add(
-        ids=[doc_id],
-        documents=[doc.content],
-        metadatas=[{
-            "category": doc.category,
-            "product_name": doc.product_name,
-            "doc_type": doc.doc_type,
-        }],
-        embeddings=[vector],
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500, chunk_overlap=80,
+        separators=["\n\n", "\n", "。", "，", " ", ""],
     )
 
+    # 切分长文档
+    if len(doc.content) > 600:
+        chunks = splitter.split_text(doc.content)
+    else:
+        chunks = [doc.content]
+
+    # 批量生成嵌入
+    emb = make_embeddings()
+    vectors = emb.embed_documents(chunks)
+
+    # 每个 chunk 作为独立条目（共享元数据，ID 加后缀）
+    doc_id_prefix = str(uuid.uuid4())
+    coll = _get_collection()
+    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        coll.add(
+            ids=[f"{doc_id_prefix}_{i}"],
+            documents=[chunk],
+            metadatas=[{
+                "category": doc.category,
+                "product_name": doc.product_name,
+                "doc_type": doc.doc_type,
+                "parent_id": doc_id_prefix,
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+            }],
+            embeddings=[vec],
+        )
+
     return JSONResponse({
-        "id": doc_id,
-        "message": "文档已添加",
+        "id": doc_id_prefix,
+        "chunks": len(chunks),
+        "message": f"文档已添加（{len(chunks)} 个片段）",
     }, status_code=201)
 
 
