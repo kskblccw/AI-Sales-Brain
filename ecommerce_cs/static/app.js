@@ -356,7 +356,9 @@ function appendToBubble(bubble, text) {
   const bubbleDiv = bubble.querySelector(".message-bubble");
   const indicator = bubbleDiv.querySelector(".typing-indicator");
   if (indicator) indicator.remove();
-  bubbleDiv.textContent += text;
+  // 累积完整文本，用 innerHTML + <br> 渲染换行
+  bubbleDiv._rawText = (bubbleDiv._rawText || "") + text;
+  bubbleDiv.innerHTML = bubbleDiv._rawText.replace(/\n/g, "<br>");
   scrollToBottom();
 }
 

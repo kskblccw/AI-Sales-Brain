@@ -226,7 +226,7 @@ def prepare_context_node(state: CSRState) -> dict:
 
 # ── 子Agent调用节点 ─────────────────────────────────────────────────────────────
 def _invoke_subgraph(name: str, state: CSRState, config: RunnableConfig) -> dict:
-    """通用子图调用：执行 → 取最后消息 → 返回结果，异常兜底"""
+    """通用子图调用：返回全部消息（含 ToolMessage），上层自行取最后一条展示"""
     _safe_print(f"[{name}] 开始处理...")
     try:
         result = _subgraphs[name].invoke({"messages": state["messages"]}, config)
@@ -234,29 +234,36 @@ def _invoke_subgraph(name: str, state: CSRState, config: RunnableConfig) -> dict
         if not msgs:
             _safe_print(f"[{name}] 子图返回空消息，使用兜底回复")
             return {"messages": [AIMessage(content=f"{name}专员暂时无法处理您的请求，请稍后重试或联系人工客服。")]}
-        last_msg = msgs[-1]
-        _safe_print(f"[{name}] 完成: {str(last_msg.content)[:80]}...")
-        return {"messages": [last_msg]}
+        _safe_print(f"[{name}] 完成: {str(msgs[-1].content)[:80]}...")
+        return {"messages": msgs}
     except Exception as e:
         _safe_print(f"[{name}] 异常: {e}")
         return {"messages": [AIMessage(content="抱歉，系统处理您的请求时遇到问题，请稍后重试。如需紧急帮助请拨打 400-888-8888。")]}
 
 
+def _has_approval_marker(msgs: list) -> str:
+    """搜全部消息（含 ToolMessage），检测是否包含需要确认的操作"""
+    for m in msgs:
+        content = str(getattr(m, "content", ""))
+        if "申请编号" in content:
+            return content
+    return ""
+
+
 def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
     result = _invoke_subgraph("order", state, config)
-    last_msg = result["messages"][-1]
+    msgs = result["messages"]
+    last_msg = msgs[-1]
 
-    # 检查是否需要人工审核（地址修改等敏感操作，包含"申请编号"即触发）
-    content = str(last_msg.content) if last_msg.content else ""
-    if "申请编号" in content:
-        _safe_print("[Order Agent] 敏感操作需人工审核，路由至 human_approval")
-        # 提取回滚所需信息
+    trigger = _has_approval_marker(msgs)
+    if trigger:
+        _safe_print("[Order Agent] 敏感操作需确认，路由至 human_approval")
         import re, json as _json
         meta = {}
-        m = re.search(r"订单号：(\w+)", content)
+        m = re.search(r"订单号：(\w+)", trigger)
         if m:
             meta["order_no"] = m.group(1)
-        m = re.search(r"旧地址：(.+?)(?:\n|$)", content)
+        m = re.search(r"旧地址：(.+?)(?:\n|$)", trigger)
         if m:
             meta["old_address"] = m.group(1).strip()
         return {
@@ -265,31 +272,32 @@ def call_order_agent(state: CSRState, config: RunnableConfig) -> dict:
             "approval_meta": _json.dumps(meta, ensure_ascii=False) if meta else "",
         }
 
-    return result
+    return {"messages": [last_msg]}
 
 
 def call_product_agent(state: CSRState, config: RunnableConfig) -> dict:
-    return _invoke_subgraph("product", state, config)
+    result = _invoke_subgraph("product", state, config)
+    return {"messages": [result["messages"][-1]]}
 
 
 def call_aftersale_agent(state: CSRState, config: RunnableConfig) -> dict:
     result = _invoke_subgraph("aftersale", state, config)
-    last_msg = result["messages"][-1]
+    msgs = result["messages"]
+    last_msg = msgs[-1]
 
-    # 检查是否创建了售后工单（包含申请编号 = 需人工审核）
-    content = str(last_msg.content) if last_msg.content else ""
-    if "申请编号" in content:
-        _safe_print("[AfterSale Agent] 售后工单已创建，触发人工审核流程")
+    if _has_approval_marker(msgs):
+        _safe_print("[AfterSale Agent] 售后工单已创建，触发确认流程")
         return {
             "messages": [last_msg],
             "next_agent": "human_approval",
         }
 
-    return result
+    return {"messages": [last_msg]}
 
 
 def call_faq_agent(state: CSRState, config: RunnableConfig) -> dict:
-    return _invoke_subgraph("faq", state, config)
+    result = _invoke_subgraph("faq", state, config)
+    return {"messages": [result["messages"][-1]]}
 
 
 # ── 用户确认节点 ────────────────────────────────────────────────────────────────
