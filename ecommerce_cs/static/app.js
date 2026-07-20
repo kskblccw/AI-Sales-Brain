@@ -506,6 +506,111 @@ chatInput.addEventListener("focus", function () {
   scheduleBackgroundCompress(200);
 });
 
+// ── 图片上传（多模态：粘贴 / 拖拽 / 选择文件）───────────────────────────
+async function uploadImage(file) {
+  if (isProcessing) return;
+  isProcessing = true;
+  btnSend.disabled = true;
+  approvalBanner.style.display = "none";
+  _compressFiredForTurn = false;
+
+  var sessionId = getCurrentSessionId();
+  var savedPhone = sessionStorage.getItem(PHONE_STORAGE_KEY) || "";
+  var phoneParam = savedPhone ? "&phone=" + encodeURIComponent(savedPhone) : "";
+
+  // 显示缩略图 + 加载状态
+  var reader = new FileReader();
+  var imgDiv = null;
+  reader.onload = function (e) {
+    imgDiv = addMessage("user", "");
+    imgDiv.querySelector(".message-bubble").innerHTML =
+      '<img src="' + e.target.result + '" class="chat-image">';
+    scrollToBottom();
+  };
+  reader.readAsDataURL(file);
+
+  // 上传 + 视觉分析
+  var formData = new FormData();
+  formData.append("file", file);
+  var analysis = "";
+  try {
+    var resp = await fetch("/api/upload/" + encodeURIComponent(sessionId), {
+      method: "POST", body: formData,
+    });
+    var data = await resp.json();
+    analysis = data.analysis || "";
+  } catch (e) {
+    addMessage("assistant", "图片上传失败: " + e.message);
+    isProcessing = false;
+    btnSend.disabled = false;
+    return;
+  }
+
+  // 将分析文本作为隐藏上下文发送给 Agent（不在前端显示）
+  var hiddenMsg = analysis ? "[用户上传了一张图片，图片内容：" + analysis + "]" : "[用户上传了一张图片]";
+  currentAssistantBubble = createAssistantBubble();
+  cacheSession(sessionId, "上传了图片");
+  loadSessionList();
+
+  try {
+    var resp2 = await fetch(
+      "/api/chat/" + encodeURIComponent(sessionId) + "/stream?message=" + encodeURIComponent(hiddenMsg) + phoneParam
+    );
+    var streamReader = resp2.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    while (true) {
+      var chunk = await streamReader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      var lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith("data:")) {
+          var dataStr = lines[i].slice(5).trim();
+          if (!dataStr) continue;
+          try { handleSSEEvent(JSON.parse(dataStr)); } catch (e) {}
+        }
+      }
+    }
+  } catch (err) {
+    if (currentAssistantBubble) {
+      appendToBubble(currentAssistantBubble, "\n\n网络错误：" + err.message);
+    }
+  }
+
+  isProcessing = false;
+  btnSend.disabled = false;
+  chatInput.focus();
+}
+
+// 粘贴图片
+function handlePaste(event) {
+  var items = (event.clipboardData || window.clipboardData).items;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf("image") !== -1) {
+      event.preventDefault();
+      uploadImage(items[i].getAsFile());
+      return;
+    }
+  }
+}
+
+// 选择文件
+function handleImageSelect(event) {
+  var file = event.target.files[0];
+  if (file) uploadImage(file);
+  event.target.value = "";
+}
+
+// 拖拽上传
+chatMessages.addEventListener("dragover", function (e) { e.preventDefault(); });
+chatMessages.addEventListener("drop", function (e) {
+  e.preventDefault();
+  var file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith("image/")) uploadImage(file);
+});
+
 // ── 人工审核 ────────────────────────────────────────────────────────────────
 async function handleApproval(approved) {
   const sessionId = getCurrentSessionId();

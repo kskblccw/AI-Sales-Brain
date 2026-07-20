@@ -394,6 +394,24 @@ body {
   cursor: not-allowed;
 }
 
+/* === 图片上传按钮 === */
+.btn-upload {
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px;
+  border: 2px solid var(--border); border-radius: 50%;
+  cursor: pointer; color: var(--text-secondary);
+  transition: all 0.2s; flex-shrink: 0;
+}
+.btn-upload:hover { border-color: var(--primary); color: var(--primary); }
+
+/* === 聊天中的图片 === */
+.chat-image {
+  max-width: 240px; max-height: 240px;
+  border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border);
+}
+.message.user .chat-image { border-color: rgba(255,255,255,0.3); }
+
 /* === 滚动条 === */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -68,11 +68,16 @@
 
   <div class="chat-input-area">
     <div class="chat-input-wrapper">
+      <label class="btn-upload" title="上传图片（也可直接粘贴或拖拽）">
+        <input type="file" id="imageInput" accept="image/*" onchange="handleImageSelect(event)" style="display:none">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      </label>
       <input
         type="text"
         id="chatInput"
-        placeholder="输入您的问题，如：帮我查一下订单 ORD202401010001..."
+        placeholder="输入问题，或粘贴/拖拽图片..."
         onkeydown="handleKeyDown(event)"
+        onpaste="handlePaste(event)"
         autocomplete="off"
       />
       <button class="btn-send" id="btnSend" onclick="sendMessage()">发送</button>

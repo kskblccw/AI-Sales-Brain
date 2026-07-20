@@ -8,9 +8,11 @@ server.py — FastAPI 后端 + SSE 流式端点
 
 import json
 import asyncio
+import time
+import base64
 from pathlib import Path
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -65,7 +67,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="电商智能客服系统", version="1.0", lifespan=lifespan)
 
 static_dir = Path(__file__).parent / "static"
+uploads_dir = Path(__file__).parent / "uploads"
+uploads_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -294,7 +299,7 @@ async def chat_stream(session_id: str, message: str = "", phone: str = ""):
                             continue
                         if hasattr(chunk, "content") and chunk.content:
                             text = str(chunk.content)
-                            if text.startswith("[系统记忆]") or text.strip() in ("order", "product", "aftersale", "faq", "human", "FINISH"):
+                            if text.startswith("[系统记忆]") or text.startswith("[用户上传") or text.strip() in ("order", "product", "aftersale", "faq", "human", "FINISH"):
                                 continue
                             yield {"event": "token", "data": json.dumps(
                                 {"type": "token", "content": text}, ensure_ascii=False)}
@@ -434,6 +439,8 @@ async def get_history(session_id: str):
                 continue
             if msg_type == "ai" and not content.strip():
                 continue
+            if "[用户上传" in content:
+                continue
             role = {"human": "user", "ai": "assistant", "system": "system"}.get(msg_type, "unknown")
             messages.append({"role": role, "content": content})
 
@@ -498,6 +505,53 @@ async def debug_checkpoints():
             result[tid] = []
         result[tid].append({"checkpoint_id": r["checkpoint_id"], "size": r["size"]})
     return JSONResponse({"threads": len(result), "detail": result})
+
+
+# ── 图片上传 + 视觉理解（多模态入口）─────────────────────────────────────────
+@app.post("/api/upload/{session_id}")
+async def upload_image(session_id: str, file: UploadFile = File(...)):
+    """上传图片并用视觉 LLM 分析内容"""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, detail="仅支持图片文件")
+
+    # 保存图片
+    session_dir = uploads_dir / session_id
+    session_dir.mkdir(exist_ok=True)
+    filename = f"{int(time.time())}_{file.filename}"
+    filepath = session_dir / filename
+    content = await file.read()
+    filepath.write_bytes(content)
+
+    # 视觉 LLM 分析
+    try:
+        from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
+        from langchain_openai import ChatOpenAI
+        img_b64 = base64.b64encode(content).decode()
+
+        vision_llm = ChatOpenAI(
+            model="qwen-vl-plus",
+            base_url=DASHSCOPE_BASE_URL,
+            api_key=DASHSCOPE_API_KEY,
+            temperature=0.3,
+        )
+        response = vision_llm.invoke([
+            HumanMessage(content=[
+                {"type": "text", "text": (
+                    "你是一个电商客服助手。请简短描述这张图片的内容。"
+                    "如果是订单截图，提取订单号。如果是商品照片，描述外观和可能的问题。"
+                    "如果是聊天记录，提取关键信息。2-3句话。"
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            ])
+        ])
+        analysis = response.content.strip()
+    except Exception as e:
+        analysis = f"[视觉分析失败: {e}]"
+
+    return JSONResponse({
+        "analysis": analysis,
+        "image_url": f"/uploads/{session_id}/{filename}",
+    })
 
 
 # ── 健康检查 ────────────────────────────────────────────────────────────────────

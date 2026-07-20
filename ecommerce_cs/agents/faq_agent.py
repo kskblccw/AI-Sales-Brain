@@ -14,8 +14,9 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from config import make_llm
 from tools.faq_tools import FAQ_TOOLS
 from tools.auth_tools import AUTH_TOOLS
+from mcp_config import get_langchain_mcp_tools
 
-_AGENT_TOOLS = FAQ_TOOLS + AUTH_TOOLS
+_AGENT_TOOLS = FAQ_TOOLS + AUTH_TOOLS + get_langchain_mcp_tools()
 
 
 class FAQAgentState(TypedDict):
@@ -30,12 +31,13 @@ def build_faq_agent() -> StateGraph:
 
     SYSTEM_PROMPT = """你是电商FAQ专员兼默认接待员，解答配送/支付/会员/售后政策等通用问题。简洁专业，不要每句都引用用户画像。
 
-工具：search_faq(问题) / get_faq_categories() / get_current_user_phone()
+工具：search_faq(问题) / get_faq_categories() / get_current_user_phone() / mcp_web_search(问题) / mcp_create_ticket(标题, 优先级)
 
 规则：
-- 任何问题先搜FAQ，用自己的话整理回复，禁止编造政策
+- 任何问题先搜FAQ；FAQ查不到→调 mcp_web_search 搜网页
 - 寒暄→简短问候+引导用户说出需求
-- FAQ无答案→直接告知未收录；超范围→引导描述需求
+- 需要人工跟进→调 mcp_create_ticket 创建工单
+- 禁止编造政策或数据
 """
 
     def agent_node(state: FAQAgentState, config: RunnableConfig) -> dict:

@@ -24,8 +24,9 @@
 - **向量数据库**: Chroma，存储商品知识库（RAG）
 - **业务数据库**: PostgreSQL（用户、订单、商品、FAQ）+ SQLAlchemy 2.0 ORM
 - **会话持久化**: PostgresSaver（LangGraph checkpoint）
-- **前端**: 原生 HTML/CSS/JS + SSE 流式响应
+- **前端**: 原生 HTML/CSS/JS + SSE 流式响应 + 图片粘贴/拖拽上传
 - **知识库管理**: 独立端口 8001，支持 CRUD、语义搜索、索引重建
+- **MCP 扩展**: web_search（DuckDuckGo）+ demo_notify（通知/工单），无需外部 API Key
 
 ## 系统截图
 
@@ -52,11 +53,13 @@
 | 物流追踪 | 查询快递轨迹，支持修改收货地址（需用户确认） |
 | 商品推荐 | 数据库关键词搜索 + Chroma RAG 知识库检索 |
 | 售后处理 | 退货/换货/退款申请，自动列出用户订单供选择 |
-| FAQ 问答 | 43 条常见问题覆盖配送/支付/会员/售后/账号 |
-| 用户确认 | 敏感操作（售后/改地址）弹窗确认，确认前可取消 |
-| 转人工 | 触发后告知用户人工客服联系方式 |
+| FAQ 问答 | 43 条常见问题 + MCP 网页搜索（本地查不到自动上网搜） |
+| 图片理解 | 支持粘贴/拖拽上传图片，视觉 LLM 分析后 Agent 自动回复 |
+| 用户确认 | 敏感操作弹窗确认，取消时自动回滚数据 |
+| 转人工 | 触发后创建工单 + 告知客服联系方式 |
 | 记忆系统 | 滑动窗口 + LLM 摘要压缩 + 用户画像，跨会话持久化 |
 | 手机号登录 | 手机号验证身份，号码不进入 LLM 上下文 |
+| MCP 扩展 | web_search 网页搜索 + demo_notify 通知/工单 |
 
 ### 知识库管理（端口 8001）
 
@@ -90,6 +93,9 @@ ecommerce_cs/
 │   └── app.js                  # SSE 流式接收 + UI 渲染
 ├── kb_static/
 │   └── index.html              # 知识库管理界面（含 CSS/JS）
+├── mcp_servers/                # MCP Server 扩展
+│   ├── web_search/             #   网页搜索（DuckDuckGo）
+│   └── demo_notify/            #   通知/工单
 ├── pictures/                   # 系统截图
 ├── config.py                   # LLM/Embeddings/DB 配置
 ├── database.py                 # ORM 模型 + CRUD 函数
@@ -98,15 +104,16 @@ ecommerce_cs/
 ├── graph.py                    # Supervisor 主图 + 路由
 ├── memory.py                   # 记忆系统（滑动窗口/摘要/画像）
 ├── rag.py                      # Chroma 向量库构建 + RAG 模板
-├── server.py                   # FastAPI 客服后端
+├── server.py                   # FastAPI 客服后端（含图片上传/视觉LLM）
 ├── kb_server.py                # FastAPI 知识库管理后端
+├── mcp_config.py               # MCP 客户端 + LangChain Tool 包装
 ├── start_all.py                # 一键启动双服务
 ├── eval.py                     # LangSmith 自动化评估
 ├── deploy_graph.py             # LangGraph Cloud 部署入口
 ├── langgraph.json              # Cloud 部署配置
 ├── requirements.txt            # 依赖清单
 └── .env                        # 环境变量（API Key 等）
-```
+
 
 ## 快速开始
 
@@ -219,6 +226,21 @@ Chroma 向量库存储 5 层知识：
 
 嵌入模型使用 DashScope text-embedding-v3，批量请求优化。
 
+### MCP 扩展
+
+FAQ Agent 挂载了 2 个 MCP 工具，本地知识库查不到时自动联网搜索：
+
+| 工具 | 来源 | 说明 |
+|------|------|------|
+| `mcp_web_search` | DuckDuckGo API | 免费网页搜索，无需 API Key |
+| `mcp_create_ticket` | 本地日志 | 创建工单记录到 JSONL |
+
+MCP Server 采用双模设计：独立模式下直接 `import` 调用函数；安装 `mcp` 包后自动切换为标准 MCP stdio 协议。参见 [MCP 设计方案](docs/MCP设计方案.md)。
+
+### 多模态入口
+
+支持图片上传 + 视觉 LLM 理解。用户粘贴/拖拽/选择图片后，`qwen-vl-plus` 分析图片内容，转换为文本描述注入消息流，后续 Agent 链路完全复用。
+
 ## API 概览
 
 ### 客服系统 (8000)
@@ -235,6 +257,7 @@ Chroma 向量库存储 5 层知识：
 | GET | `/api/sessions?phone=xxx` | 列出用户会话 |
 | POST | `/api/human/approve/{session_id}` | 确认操作 |
 | POST | `/api/human/reject/{session_id}` | 取消操作 |
+| POST | `/api/upload/{session_id}` | 上传图片 + 视觉 LLM 分析 |
 
 ### 知识库管理 (8001)
 
